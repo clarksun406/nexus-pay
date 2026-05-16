@@ -124,6 +124,7 @@ class RetryService {
     let delayMinutes: number;
     let useAlternativeProvider = false;
     let strategyType: RetryStrategy['type'] = 'EXPONENTIAL';
+    let immediate = false;
 
     switch (category) {
       case 'INSUFFICIENT_FUNDS':
@@ -133,8 +134,9 @@ class RetryService {
         break;
 
       case 'NETWORK_ERROR':
-        // Quick retry for network issues
-        delayMinutes = Math.min(config.initialDelayMinutes, 5);
+        // Immediate retry for transient network issues
+        delayMinutes = 0;
+        immediate = true;
         strategyType = 'FIXED';
         break;
 
@@ -160,14 +162,117 @@ class RetryService {
         strategyType = 'EXPONENTIAL';
     }
 
-    // Apply recommended delay as minimum
-    delayMinutes = Math.max(delayMinutes, recommendedDelay);
+    // Apply recommended delay as minimum (skip for immediate)
+    if (!immediate) {
+      delayMinutes = Math.max(delayMinutes, recommendedDelay);
+    }
 
     return {
       type: strategyType,
       delayMinutes,
       useAlternativeProvider,
       reason: `${category}: ${declineCode}`,
+    };
+  }
+
+  /**
+   * Execute immediate retry for transient errors
+   */
+  async executeImmediateRetry(
+    paymentIntentId: string,
+    originalRequestId: string,
+    declineCode: string,
+    declineMessage: string,
+    provider: string,
+    connectorAccountId: string
+  ): Promise<{ success: boolean; message: string }> {
+    const intent = await db('payment_intents').where({ id: paymentIntentId }).first();
+    if (!intent) {
+      return { success: false, message: 'Payment intent not found' };
+    }
+
+    // Try with fallback provider if available
+    const routing = await routingEngine.resolve(
+      intent.merchant_id,
+      intent.amount,
+      intent.currency,
+      null,
+      intent.payment_method_type
+    );
+
+    const fallbackAccountId = routing?.fallback?.id || connectorAccountId;
+
+    // Create immediate retry attempt
+    const [attempt] = await db('retry_attempts')
+      .insert({
+        payment_intent_id: paymentIntentId,
+        original_request_id: originalRequestId,
+        attempt_number: 1,
+        connector_account_id: fallbackAccountId,
+        original_decline_code: declineCode,
+        original_decline_message: declineMessage,
+        decline_category: 'NETWORK_ERROR',
+        status: 'IN_PROGRESS',
+        scheduled_at: new Date(),
+        retry_strategy: JSON.stringify({ type: 'FIXED', delayMinutes: 0, immediate: true }),
+      })
+      .returning('*');
+
+    // Get original payment method
+    const originalRequest = await db('payment_requests').where({ id: originalRequestId }).first();
+
+    // Execute charge immediately
+    try {
+      const result = await providerDispatcher.charge(
+        provider,
+        {
+          intentId: paymentIntentId,
+          amount: intent.amount,
+          currency: intent.currency,
+          paymentMethodType: intent.payment_method_type,
+          paymentMethodId: originalRequest?.provider_request_id || '',
+          idempotencyKey: `retry-immediate-${attempt.id}`,
+          captureMethod: intent.capture_method,
+        },
+        fallbackAccountId
+      );
+
+      await db('retry_attempts').where({ id: attempt.id }).update({
+        status: result.success ? 'SUCCEEDED' : 'FAILED',
+        attempted_at: new Date(),
+        failure_code: result.failureCode,
+        failure_message: result.failureMessage,
+      });
+
+      if (result.success) {
+        await db('payment_intents').where({ id: paymentIntentId }).update({
+          status: intent.capture_method === 'MANUAL' ? 'REQUIRES_CAPTURE' : 'SUCCEEDED',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+        return { success: true, message: 'Immediate retry succeeded' };
+      }
+
+      // If still fails, schedule for later retry
+      await this.scheduleRetry(
+        paymentIntentId,
+        originalRequestId,
+        result.failureCode || declineCode,
+        result.failureMessage || declineMessage,
+        provider,
+        fallbackAccountId
+      );
+
+      return { success: false, message: 'Immediate retry failed, scheduled for later' };
+    } catch (err: any) {
+      await db('retry_attempts').where({ id: attempt.id }).update({
+        status: 'FAILED',
+        attempted_at: new Date(),
+        failure_message: err.message,
+      });
+      return { success: false, message: err.message };
+    }
+  }
     };
   }
 

@@ -4,6 +4,7 @@ import { routingEngine } from './routing-engine';
 import { providerDispatcher } from './provider-dispatcher';
 import { retryService } from './retry.service';
 import { healthMonitorService } from './health-monitor.service';
+import { declineCodeService } from './decline-code.service';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -172,18 +173,38 @@ export class PaymentIntentService {
         0 // latency will be tracked by middleware
       );
 
-      // Schedule retry if failed and retryable
+      // Handle retry based on error category
       if (!result.success && result.failureCode) {
         const { retryable } = await retryService.shouldRetry(merchantId, provider, result.failureCode);
         if (retryable) {
-          await retryService.scheduleRetry(
-            intentId,
-            attempt.id,
-            result.failureCode,
-            result.failureMessage || '',
-            provider,
-            providerAccountId
-          );
+          const category = await declineCodeService.getCategory(provider, result.failureCode);
+
+          // Immediate retry for transient network errors
+          if (category === 'NETWORK_ERROR') {
+            const retryResult = await retryService.executeImmediateRetry(
+              intentId,
+              attempt.id,
+              result.failureCode,
+              result.failureMessage || '',
+              provider,
+              providerAccountId
+            );
+            if (retryResult.success) {
+              // Update intent status after successful immediate retry
+              const [retried] = await db('payment_intents').where({ id: intentId }).first();
+              return this.toResponse(retried);
+            }
+          } else {
+            // Schedule delayed retry for other error types
+            await retryService.scheduleRetry(
+              intentId,
+              attempt.id,
+              result.failureCode,
+              result.failureMessage || '',
+              provider,
+              providerAccountId
+            );
+          }
         }
       }
 
