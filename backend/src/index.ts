@@ -11,6 +11,10 @@ import paymentIntentRoutes from './routes/payment-intent.routes';
 import merchantRoutes from './routes/merchant.routes';
 import publicRoutes from './routes/public.routes';
 import meRoutes from './routes/me.routes';
+import retryRoutes from './routes/retry.routes';
+import healthRoutes from './routes/health.routes';
+import reconciliationRoutes from './routes/reconciliation.routes';
+import threedsRoutes from './routes/threeds.routes';
 
 const app = express();
 
@@ -36,6 +40,10 @@ app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/payment-intents', paymentIntentRoutes);
 app.use('/api/v1/merchants', merchantRoutes);
 app.use('/api/v1/me', meRoutes);
+app.use('/api/v1', retryRoutes);
+app.use('/api/v1', healthRoutes);
+app.use('/api/v1', reconciliationRoutes);
+app.use('/api/v1', threedsRoutes);
 
 // Public routes
 app.use('/pub', publicRoutes);
@@ -54,6 +62,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   });
 });
 
+// Start server
 app.listen(config.port, () => {
   console.log(`NexusPay backend running on port ${config.port}`);
   console.log(`Health: http://localhost:${config.port}/health`);

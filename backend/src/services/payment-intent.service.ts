@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../db/connection';
 import { routingEngine } from './routing-engine';
 import { providerDispatcher } from './provider-dispatcher';
+import { retryService } from './retry.service';
+import { healthMonitorService } from './health-monitor.service';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -163,6 +165,28 @@ export class PaymentIntentService {
         payload: JSON.stringify(this.toResponse(updated)),
       });
 
+      // Record health metrics
+      await healthMonitorService.recordRequest(
+        providerAccountId,
+        result.success,
+        0 // latency will be tracked by middleware
+      );
+
+      // Schedule retry if failed and retryable
+      if (!result.success && result.failureCode) {
+        const { retryable } = await retryService.shouldRetry(merchantId, provider, result.failureCode);
+        if (retryable) {
+          await retryService.scheduleRetry(
+            intentId,
+            attempt.id,
+            result.failureCode,
+            result.failureMessage || '',
+            provider,
+            providerAccountId
+          );
+        }
+      }
+
       return this.toResponse(updated);
     } catch (err: any) {
       await db('payment_intents').where({ id: intentId }).update({ status: 'FAILED' });
@@ -171,6 +195,10 @@ export class PaymentIntentService {
         failure_code: 'PROVIDER_ERROR',
         failure_message: err.message,
       });
+
+      // Record health metrics for failure
+      await healthMonitorService.recordRequest(providerAccountId, false, 0);
+
       throw err;
     }
   }
