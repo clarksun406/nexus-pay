@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { config } from './config';
 import { requestLogger } from './middleware/logging';
+import { schedulerService } from './services/scheduler.service';
 
 // Routes
 import authRoutes from './routes/auth.routes';
@@ -66,6 +67,16 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(config.port, () => {
   console.log(`NexusPay backend running on port ${config.port}`);
   console.log(`Health: http://localhost:${config.port}/health`);
+
+  // Start scheduler for retry execution and health monitoring
+  schedulerService.start(60000); // Run every minute
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down...');
+  schedulerService.stop();
+  process.exit(0);
 });
 
 export default app;
