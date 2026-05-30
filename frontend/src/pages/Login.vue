@@ -118,6 +118,9 @@ async function handleMfaVerify() {
         </form>
 
         <p class="text-sm text-center mt-4 text-gray-500">
+          <router-link to="/forgot-password" class="text-indigo-600 hover:underline">Forgot password?</router-link>
+        </p>
+        <p class="text-sm text-center mt-2 text-gray-500">
           Don't have an account?
           <router-link to="/register" class="text-indigo-600 hover:underline">Register</router-link>
         </p>

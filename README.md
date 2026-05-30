@@ -110,3 +110,51 @@ Public checkout endpoints are under `/pub/`.
 | Payment Intents | `/api/v1/payment-intents/` |
 | Merchant Resources | `/api/v1/merchants/{id}/...` |
 | Public Checkout | `/pub/pay/{token}`, `/pub/tokenize` |
+
+## Configuring Provider Webhooks
+
+NexusPay receives provider events at the following URLs (`PAY_BASE_URL` is the
+public base URL of the backend, e.g. `https://api.example.com`):
+
+| Provider  | URL                                  | Notes |
+|-----------|--------------------------------------|-------|
+| Stripe    | `${PAY_BASE_URL}/webhooks/stripe`    | Set `STRIPE_WEBHOOK_SECRET` in the backend `.env` to the value Stripe gave you. |
+| Square    | `${PAY_BASE_URL}/webhooks/square`    | Per-connector. Set the same URL in the Square Dashboard subscription **and** in the connector's `provider_config.webhookNotificationUrl` (or leave the latter unset to use the default). The signature key from Square goes into the connector's credentials as `webhookSignatureKey`. |
+| Braintree | `${PAY_BASE_URL}/webhooks/braintree` | The handler responds to Braintree's `bt_challenge` GET verification automatically using the `publicKey`/`privateKey` of any active Braintree connector. |
+
+### Square — exact-URL signature requirement
+
+Square computes the signature as `HMAC-SHA256(signingKey, notificationUrl + rawBody)`.
+The `notificationUrl` **must match exactly** the URL configured in the Square
+Dashboard, including scheme/host/path. If your backend is behind a proxy,
+either:
+
+1. set `provider_config.webhookNotificationUrl` on the Square connector to
+   the public URL Square sees, **or**
+2. set `PAY_BASE_URL` so the default `${PAY_BASE_URL}/webhooks/square` matches.
+
+If the URL doesn't match, signature verification fails with `400 Invalid signature`.
+
+### Braintree — webhook URL verification
+
+When you register the webhook URL in the Braintree gateway, it sends a `GET`
+to `?bt_challenge=...`. NexusPay's `/webhooks/braintree` GET handler answers
+with `${publicKey}|${HMAC-SHA1(SHA1(privateKey), bt_challenge).hex}` for the
+first active Braintree connector — so you can paste the URL and it Just Works
+as long as you've already saved the connector with both keys.
+
+## Email Delivery
+
+Invitation links and password reset emails are sent via SMTP when configured:
+
+```env
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=apikey
+SMTP_PASSWORD=...
+SMTP_FROM=NexusPay <no-reply@yourdomain.com>
+```
+
+When `SMTP_HOST` is empty (the default), the message is logged to stdout
+instead — useful for local development. The dashboard always shows the
+generated invite URL so flows still work end-to-end without SMTP.

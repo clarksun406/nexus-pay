@@ -16,6 +16,31 @@ const refunding = ref(false)
 const refundError = ref('')
 const refundForm = ref({ amount: '', reason: '' })
 
+const actionInFlight = ref(false)
+const actionError = ref('')
+
+async function captureNow() {
+  if (!confirm('Capture this authorised payment now?')) return
+  actionError.value = ''; actionInFlight.value = true
+  try {
+    await api.post(`/api/v1/merchants/${auth.activeMerchantId}/payment-intents/${route.params.id}/capture`)
+    await fetchPayment()
+  } catch (err: any) {
+    actionError.value = err.response?.data?.detail || 'Capture failed'
+  } finally { actionInFlight.value = false }
+}
+
+async function cancelNow() {
+  if (!confirm('Cancel this payment? This is irreversible.')) return
+  actionError.value = ''; actionInFlight.value = true
+  try {
+    await api.post(`/api/v1/merchants/${auth.activeMerchantId}/payment-intents/${route.params.id}/cancel`)
+    await fetchPayment()
+  } catch (err: any) {
+    actionError.value = err.response?.data?.detail || 'Cancel failed'
+  } finally { actionInFlight.value = false }
+}
+
 async function fetchPayment() {
   try {
     const { data } = await api.get(`/api/v1/merchants/${auth.activeMerchantId}/payment-intents/${route.params.id}`)
@@ -76,13 +101,30 @@ onMounted(() => {
               'bg-red-100 text-red-700': payment.status === 'FAILED',
               'bg-gray-100 text-gray-600': payment.status === 'CANCELED',
               'bg-blue-100 text-blue-700': payment.status === 'PROCESSING',
+              'bg-yellow-100 text-yellow-700': payment.status === 'REQUIRES_CAPTURE' || payment.status === 'REQUIRES_ACTION',
             }">{{ payment.status }}</span>
+          <button v-if="payment.status === 'REQUIRES_CAPTURE'" @click="captureNow" :disabled="actionInFlight"
+            class="text-sm bg-green-600 text-white px-3 py-1 rounded-md hover:bg-green-700 disabled:opacity-50">
+            Capture
+          </button>
+          <button v-if="['REQUIRES_PAYMENT_METHOD','REQUIRES_CONFIRMATION','REQUIRES_CAPTURE','REQUIRES_ACTION'].includes(payment.status)"
+                  @click="cancelNow" :disabled="actionInFlight"
+            class="text-sm border border-gray-400 text-gray-700 px-3 py-1 rounded-md hover:bg-gray-50 disabled:opacity-50">
+            Cancel
+          </button>
+          <a v-if="payment.status === 'REQUIRES_ACTION' && payment.threeDsActionUrl"
+             :href="payment.threeDsActionUrl" target="_blank" rel="noopener"
+             class="text-sm border border-indigo-600 text-indigo-600 px-3 py-1 rounded-md hover:bg-indigo-50">
+            Open 3DS Action
+          </a>
           <button v-if="payment.status === 'SUCCEEDED'" @click="showRefund = !showRefund"
             class="text-sm border border-indigo-600 text-indigo-600 px-3 py-1 rounded-md hover:bg-indigo-50">
             {{ showRefund ? 'Cancel' : 'Refund' }}
           </button>
         </div>
       </div>
+
+      <div v-if="actionError" class="bg-red-50 border border-red-200 text-red-700 text-sm rounded px-3 py-2">{{ actionError }}</div>
 
       <div v-if="showRefund" class="border rounded-lg p-4 bg-gray-50 space-y-3">
         <div v-if="refundError" class="bg-red-50 border border-red-200 text-red-700 text-sm rounded px-3 py-2">{{ refundError }}</div>

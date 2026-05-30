@@ -308,6 +308,30 @@ async function handleBraintreeNotification(xml: string, account: any): Promise<v
   });
 }
 
+// Braintree's webhook URL verification: the gateway makes a GET with a
+// `bt_challenge` query param and expects back `<publicKey>|<sigHex>` where
+// sig = HMAC-SHA1(SHA1(privateKey), bt_challenge).hex. We try every active
+// Braintree connector's keys and respond with the first match.
+router.get('/braintree', async (req: Request, res: Response) => {
+  const challenge = (req.query?.bt_challenge as string | undefined) || '';
+  if (!challenge) {
+    return res.status(400).type('text/plain').send('missing bt_challenge');
+  }
+
+  const accounts = await db('provider_accounts')
+    .where({ provider: 'BRAINTREE', status: 'ACTIVE' });
+
+  for (const account of accounts) {
+    const creds = loadAccountCreds(account);
+    if (!creds.publicKey || !creds.privateKey) continue;
+    const hashedKey = crypto.createHash('sha1').update(creds.privateKey).digest();
+    const sig = crypto.createHmac('sha1', hashedKey).update(challenge).digest('hex');
+    return res.type('text/plain').send(`${creds.publicKey}|${sig}`);
+  }
+
+  return res.status(404).type('text/plain').send('no Braintree connector configured');
+});
+
 router.post(
   '/braintree',
   express.urlencoded({ extended: false, limit: '512kb' }),

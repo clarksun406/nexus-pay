@@ -34,6 +34,15 @@ const acceptInviteSchema = z.object({
   password: z.string().min(8).optional(),
 });
 
+const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8),
+});
+
 // POST /api/v1/auth/register
 router.post('/register', async (req: Request, res: Response) => {
   try {
@@ -86,6 +95,28 @@ router.post('/accept-invite', async (req: Request, res: Response) => {
   try {
     const body = acceptInviteSchema.parse(req.body);
     const result = await authService.acceptInvite(body.token, body.password);
+    res.json(result);
+  } catch (err: any) {
+    const status = err.status || (err.name === 'ZodError' ? 400 : 500);
+    res.status(status).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// POST /api/v1/auth/forgot-password
+// Always 204 to prevent account enumeration.
+router.post('/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const body = forgotPasswordSchema.parse(req.body);
+    await authService.requestPasswordReset(body.email);
+  } catch { /* swallow validation errors so callers can't enumerate */ }
+  res.status(204).send();
+});
+
+// POST /api/v1/auth/reset-password
+router.post('/reset-password', async (req: Request, res: Response) => {
+  try {
+    const body = resetPasswordSchema.parse(req.body);
+    const result = await authService.resetPassword(body.token, body.password);
     res.json(result);
   } catch (err: any) {
     const status = err.status || (err.name === 'ZodError' ? 400 : 500);

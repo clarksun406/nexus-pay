@@ -29,7 +29,15 @@ router.get('/:merchantId/payment-intents', requireRole(...READ_ALL), async (req:
     const mode = req.query.mode as string;
     const page = parseInt(req.query.page as string) || 0;
     const size = parseInt(req.query.size as string) || 20;
-    const result = await paymentIntentService.list(req.params.merchantId, mode, page, size);
+    const filters: any = {};
+    if (req.query.status) filters.status = req.query.status as string;
+    if (req.query.orderId) filters.orderId = req.query.orderId as string;
+    if (req.query.minAmount) filters.minAmount = parseInt(req.query.minAmount as string, 10);
+    if (req.query.maxAmount) filters.maxAmount = parseInt(req.query.maxAmount as string, 10);
+    if (req.query.createdFrom) filters.createdFrom = new Date(req.query.createdFrom as string);
+    if (req.query.createdTo) filters.createdTo = new Date(req.query.createdTo as string);
+    if (req.query.search) filters.search = req.query.search as string;
+    const result = await paymentIntentService.list(req.params.merchantId, mode, page, size, filters);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ title: 'Error', detail: err.message });
@@ -39,6 +47,26 @@ router.get('/:merchantId/payment-intents', requireRole(...READ_ALL), async (req:
 router.get('/:merchantId/payment-intents/:id', requireRole(...READ_ALL), async (req: Request, res: Response) => {
   try {
     const result = await paymentIntentService.get(req.params.merchantId, req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// Capture an authorised payment from the dashboard.
+router.post('/:merchantId/payment-intents/:id/capture', requireRole(...FINANCE_WRITE), async (req: Request, res: Response) => {
+  try {
+    const result = await paymentIntentService.capture(req.params.merchantId, req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// Cancel a payment from the dashboard.
+router.post('/:merchantId/payment-intents/:id/cancel', requireRole(...FINANCE_WRITE), async (req: Request, res: Response) => {
+  try {
+    const result = await paymentIntentService.cancel(req.params.merchantId, req.params.id);
     res.json(result);
   } catch (err: any) {
     res.status(err.status || 500).json({ title: 'Error', detail: err.message });
@@ -189,6 +217,16 @@ router.delete('/:merchantId/api-keys/:keyId', requireRole(...MANAGE), async (req
   try {
     await apiKeyService.revoke(req.params.merchantId, req.params.keyId);
     res.status(204).send();
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// Atomically rotate a key — issues a new active one and revokes the old one.
+router.post('/:merchantId/api-keys/:keyId/rotate', requireRole(...MANAGE), async (req: Request, res: Response) => {
+  try {
+    const result = await apiKeyService.rotate(req.params.merchantId, req.params.keyId);
+    res.status(201).json(result);
   } catch (err: any) {
     res.status(err.status || 500).json({ title: 'Error', detail: err.message });
   }
@@ -351,6 +389,34 @@ router.get('/:merchantId/disputes', requireRole(...READ_ALL), async (req: Reques
 router.get('/:merchantId/disputes/:disputeId', requireRole(...READ_ALL), async (req: Request, res: Response) => {
   try {
     const result = await disputeService.get(req.params.merchantId, req.params.disputeId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// Read / save / submit dispute evidence.
+router.get('/:merchantId/disputes/:disputeId/evidence', requireRole(...FINANCE_WRITE), async (req: Request, res: Response) => {
+  try {
+    const result = await disputeService.getEvidence(req.params.merchantId, req.params.disputeId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+router.put('/:merchantId/disputes/:disputeId/evidence', requireRole(...FINANCE_WRITE), async (req: Request, res: Response) => {
+  try {
+    const result = await disputeService.saveEvidenceDraft(req.params.merchantId, req.params.disputeId, req.body || {});
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+router.post('/:merchantId/disputes/:disputeId/evidence/submit', requireRole(...FINANCE_WRITE), async (req: Request, res: Response) => {
+  try {
+    const result = await disputeService.submitEvidence(req.params.merchantId, req.params.disputeId, req.body || {});
     res.json(result);
   } catch (err: any) {
     res.status(err.status || 500).json({ title: 'Error', detail: err.message });
