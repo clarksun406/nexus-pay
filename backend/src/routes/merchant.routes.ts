@@ -9,6 +9,8 @@ import { webhookService } from '../services/webhook.service';
 import { paymentLinkService } from '../services/payment-link.service';
 import { memberService } from '../services/member.service';
 import { logService } from '../services/log.service';
+import { disputeService } from '../services/dispute.service';
+import { payoutService } from '../services/payout.service';
 
 const router = Router({ mergeParams: true });
 
@@ -330,6 +332,50 @@ router.get('/:merchantId/logs', requireRole(...DEVELOP), async (req: Request, re
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// ── Disputes ──
+router.get('/:merchantId/disputes', requireRole(...READ_ALL), async (req: Request, res: Response) => {
+  try {
+    const mode = req.query.mode as string;
+    const page = parseInt(req.query.page as string) || 0;
+    const size = parseInt(req.query.size as string) || 20;
+    const result = await disputeService.list(req.params.merchantId, mode, page, size);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+router.get('/:merchantId/disputes/:disputeId', requireRole(...READ_ALL), async (req: Request, res: Response) => {
+  try {
+    const result = await disputeService.get(req.params.merchantId, req.params.disputeId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// ── Payouts ──
+router.get('/:merchantId/payouts', requireRole(...READ_ALL), async (req: Request, res: Response) => {
+  try {
+    const mode = req.query.mode as string;
+    const page = parseInt(req.query.page as string) || 0;
+    const size = parseInt(req.query.size as string) || 20;
+    const result = await payoutService.list(req.params.merchantId, mode, page, size);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+router.get('/:merchantId/payouts/:payoutId', requireRole(...READ_ALL), async (req: Request, res: Response) => {
+  try {
+    const result = await payoutService.get(req.params.merchantId, req.params.payoutId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(err.status || 500).json({ title: 'Error', detail: err.message });
   }
 });
 

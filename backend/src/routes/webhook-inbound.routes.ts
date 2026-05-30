@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
-import crypto from 'crypto';
 import db from '../db/connection';
 import { config } from '../config';
 import { paymentIntentService } from '../services/payment-intent.service';
+import { disputeService } from '../services/dispute.service';
+import { verifyStripeSignature } from '../utils/stripe-signature';
 
 /**
  * Inbound provider webhooks (e.g. Stripe).
@@ -16,48 +17,6 @@ import { paymentIntentService } from '../services/payment-intent.service';
  *   4. emits an outbox event so the merchant's own webhooks fire.
  */
 const router = Router();
-
-// Default Stripe webhook tolerance: 5 minutes.
-const SIGNATURE_TOLERANCE_SECONDS = 300;
-
-function verifyStripeSignature(
-  rawBody: Buffer,
-  sigHeader: string | undefined,
-  secret: string,
-): { valid: boolean; reason?: string } {
-  if (!secret) return { valid: false, reason: 'Webhook secret not configured' };
-  if (!sigHeader) return { valid: false, reason: 'Missing signature header' };
-
-  const parts = sigHeader.split(',').reduce((acc: Record<string, string>, part) => {
-    const idx = part.indexOf('=');
-    if (idx > 0) acc[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
-    return acc;
-  }, {});
-
-  const timestamp = parts['t'];
-  const v1 = parts['v1'];
-  if (!timestamp || !v1) return { valid: false, reason: 'Malformed signature header' };
-
-  // Replay protection.
-  const age = Math.abs(Math.floor(Date.now() / 1000) - parseInt(timestamp, 10));
-  if (Number.isNaN(age) || age > SIGNATURE_TOLERANCE_SECONDS) {
-    return { valid: false, reason: 'Signature timestamp outside tolerance' };
-  }
-
-  const signedPayload = `${timestamp}.${rawBody.toString('utf8')}`;
-  const expected = crypto.createHmac('sha256', secret).update(signedPayload).digest('hex');
-
-  try {
-    const expectedBuf = Buffer.from(expected);
-    const providedBuf = Buffer.from(v1);
-    if (expectedBuf.length !== providedBuf.length) return { valid: false, reason: 'Signature mismatch' };
-    if (!crypto.timingSafeEqual(expectedBuf, providedBuf)) return { valid: false, reason: 'Signature mismatch' };
-  } catch {
-    return { valid: false, reason: 'Signature comparison failed' };
-  }
-
-  return { valid: true };
-}
 
 /** Update a PaymentIntent's status (if changed) and queue a merchant webhook event. */
 async function reconcileIntentStatus(providerPaymentId: string, newStatus: string, eventType: string) {
@@ -102,6 +61,13 @@ async function handleStripeEvent(event: any): Promise<void> {
       }
       break;
     }
+    case 'charge.dispute.created':
+    case 'charge.dispute.updated':
+    case 'charge.dispute.funds_withdrawn':
+    case 'charge.dispute.funds_reinstated':
+    case 'charge.dispute.closed':
+      await disputeService.upsertFromStripe(obj, event.type);
+      break;
     default:
       // Unhandled event types are acknowledged but ignored.
       break;

@@ -1,5 +1,6 @@
 import db from '../db/connection';
 import { providerDispatcher } from './provider-dispatcher';
+import { computeFeeForConnector } from './fee-calculator';
 
 export class RefundService {
   async create(merchantId: string, intentId: string, body: { amount?: number; reason?: string }) {
@@ -50,9 +51,12 @@ export class RefundService {
       );
 
       if (result.success) {
+        // Record the refund's portion of the connector fee so payouts net out.
+        const fee = await computeFeeForConnector(refundAmount, intent.connector_account_id);
         await db('refunds').where({ id: refund.id }).update({
           status: 'SUCCEEDED',
           provider_refund_id: result.providerRefundId,
+          fee_amount: fee,
         });
       } else {
         await db('refunds').where({ id: refund.id }).update({
