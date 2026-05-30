@@ -6,6 +6,7 @@ import api from '@/lib/api'
 const auth = useAuthStore()
 const connectors = ref<any[]>([])
 const showCreate = ref(false)
+const createError = ref('')
 const form = ref({ provider: 'STRIPE', label: '', mode: 'TEST', isPrimary: false, weight: 1, secretKey: '' })
 
 async function fetchConnectors() {
@@ -16,6 +17,7 @@ async function fetchConnectors() {
 }
 
 async function createConnector() {
+  createError.value = ''
   try {
     await api.post(`/api/v1/merchants/${auth.activeMerchantId}/connectors`, {
       provider: form.value.provider,
@@ -28,7 +30,9 @@ async function createConnector() {
     showCreate.value = false
     form.value = { provider: 'STRIPE', label: '', mode: 'TEST', isPrimary: false, weight: 1, secretKey: '' }
     fetchConnectors()
-  } catch {}
+  } catch (err: any) {
+    createError.value = err.response?.data?.detail || 'Failed to create connector'
+  }
 }
 
 async function deleteConnector(id: string) {
@@ -53,6 +57,7 @@ onMounted(fetchConnectors)
 
     <div v-if="showCreate" class="bg-white rounded-lg border p-6 space-y-4">
       <h2 class="font-medium">New Connector</h2>
+      <div v-if="createError" class="bg-red-50 border border-red-200 text-red-700 text-sm rounded px-4 py-2">{{ createError }}</div>
       <div class="grid grid-cols-2 gap-4">
         <div><label class="text-xs text-gray-500">Provider</label>
           <select v-model="form.provider" class="w-full border rounded px-3 py-2 text-sm mt-1">

@@ -12,7 +12,6 @@ export class ApiKeyService {
       mode,
       type: 'SECRET',
       key_hash: secret.hash,
-      plaintext_key: secret.raw,
       prefix: secret.raw.slice(0, 10),
       name: name ? `${name} (Secret)` : 'Secret Key',
       status: 'ACTIVE',
@@ -23,7 +22,6 @@ export class ApiKeyService {
       mode,
       type: 'PUBLISHABLE',
       key_hash: publishable.hash,
-      plaintext_key: publishable.raw,
       prefix: publishable.raw.slice(0, 10),
       name: name ? `${name} (Publishable)` : 'Publishable Key',
       status: 'ACTIVE',
@@ -50,7 +48,6 @@ export class ApiKeyService {
       status: k.status,
       lastUsedAt: k.last_used_at,
       createdAt: k.created_at,
-      plaintextKey: k.plaintext_key,
     }));
   }
 
@@ -61,7 +58,6 @@ export class ApiKeyService {
     await db('api_keys').where({ id: keyId }).update({
       status: 'REVOKED',
       revoked_at: new Date(),
-      plaintext_key: null,
     });
   }
 }

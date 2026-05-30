@@ -130,6 +130,48 @@ export class PaymentIntentService {
         captureMethod: intent.capture_method,
       }, providerAccountId);
 
+      // Customer authentication required (e.g. 3DS): stop here and surface the action URL.
+      if (result.requiresAction) {
+        await db('payment_requests').where({ id: attempt.id }).update({
+          status: 'PENDING',
+          provider_request_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+
+        const [updated] = await db('payment_intents').where({ id: intentId }).update({
+          status: 'REQUIRES_ACTION',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+          three_ds_action_url: result.actionUrl || null,
+        }).returning('*');
+
+        await db('outbox_events').insert({
+          merchant_id: merchantId,
+          event_type: 'payment_intent.requires_action',
+          resource_id: intentId,
+          payload: JSON.stringify(this.toResponse(updated)),
+        });
+
+        return this.toResponse(updated);
+      }
+
+      // Async processing: leave as PROCESSING; the final state arrives via webhook.
+      if (result.pending) {
+        await db('payment_requests').where({ id: attempt.id }).update({
+          status: 'PENDING',
+          provider_request_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+
+        const [updated] = await db('payment_intents').where({ id: intentId }).update({
+          status: 'PROCESSING',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        }).returning('*');
+
+        return this.toResponse(updated);
+      }
+
       // Update attempt
       await db('payment_requests').where({ id: attempt.id }).update({
         status: result.success ? 'SUCCEEDED' : 'FAILED',

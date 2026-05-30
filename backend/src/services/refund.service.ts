@@ -45,7 +45,7 @@ export class RefundService {
     try {
       const result = await providerDispatcher.refund(
         intent.resolved_provider,
-        { providerPaymentId: intent.provider_payment_id, amount: refundAmount },
+        { providerPaymentId: intent.provider_payment_id, amount: refundAmount, currency: intent.currency },
         intent.connector_account_id,
       );
 

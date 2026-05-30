@@ -30,6 +30,11 @@ async function handlePay() {
       paymentMethodId: paymentMethodId.value,
       paymentMethodType: 'card',
     })
+    // 3DS / Strong Customer Authentication: redirect the buyer to complete it.
+    if (data.status === 'REQUIRES_ACTION' && data.threeDsActionUrl) {
+      window.location.href = data.threeDsActionUrl
+      return
+    }
     result.value = data
   } catch (err: any) {
     error.value = err.response?.data?.detail || 'Payment failed'
@@ -60,6 +65,18 @@ onMounted(fetchLink)
             </div>
             <h2 class="text-xl font-semibold">Payment Successful</h2>
             <p class="text-gray-500">{{ (result.amount / 100).toFixed(2) }} {{ result.currency?.toUpperCase() }}</p>
+          </div>
+          <div v-else-if="result.status === 'REQUIRES_ACTION'" class="text-center space-y-4">
+            <h2 class="text-xl font-semibold">Authentication Required</h2>
+            <p class="text-gray-500">This payment needs additional verification.</p>
+            <a v-if="result.threeDsActionUrl" :href="result.threeDsActionUrl"
+              class="inline-block bg-indigo-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-indigo-700">
+              Complete Authentication
+            </a>
+          </div>
+          <div v-else-if="result.status === 'PROCESSING'" class="text-center space-y-4">
+            <h2 class="text-xl font-semibold">Payment Processing</h2>
+            <p class="text-gray-500">Your payment is being processed. You'll be notified once it completes.</p>
           </div>
           <div v-else class="text-center space-y-4">
             <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto">

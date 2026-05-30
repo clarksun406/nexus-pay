@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { config } from '../config';
 import db from '../db/connection';
 import { hashSha256 } from '../utils/crypto';
@@ -35,7 +36,7 @@ export function generateAccessToken(user: AuthUser, tokenVersion: number): strin
 
 export function generateRefreshToken(user: AuthUser, tokenVersion: number): string {
   return jwt.sign(
-    { userId: user.userId, email: user.email, tokenVersion, type: 'refresh' },
+    { userId: user.userId, email: user.email, tokenVersion, type: 'refresh', jti: crypto.randomUUID() },
     config.jwt.secret,
     { expiresIn: Math.floor(config.jwt.refreshTokenExpiryMs / 1000) },
   );

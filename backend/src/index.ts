@@ -13,6 +13,7 @@ import publicRoutes from './routes/public.routes';
 import meRoutes from './routes/me.routes';
 import inboundWebhookRoutes from './routes/webhook-inbound.routes';
 import { webhookWorker } from './services/webhook-worker';
+import { assertEncryptionKey } from './utils/crypto';
 
 const app = express();
 
@@ -64,6 +65,9 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(config.port, () => {
   console.log(`NexusPay backend running on port ${config.port}`);
   console.log(`Health: http://localhost:${config.port}/health`);
+
+  // Fail fast on an invalid key; warn (but keep running) when it is unset.
+  assertEncryptionKey();
 
   // Start the background webhook delivery engine (outbox -> endpoints).
   if (process.env.WEBHOOK_WORKER_ENABLED !== 'false') {
