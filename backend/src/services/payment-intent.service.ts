@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../db/connection';
 import { routingEngine } from './routing-engine';
 import { providerDispatcher } from './provider-dispatcher';
+import { computeFeeForConnector } from './fee-calculator';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -187,10 +188,20 @@ export class PaymentIntentService {
         ? (manualCapture ? 'REQUIRES_CAPTURE' : 'SUCCEEDED')
         : 'FAILED';
 
+      // Record connector fee + net for SUCCEEDED (auto-capture) charges so
+      // payouts can aggregate them later. For manual-capture this is deferred
+      // to capture(); it'll be recomputed there.
+      let feeUpdate: any = {};
+      if (result.success && !manualCapture) {
+        const fee = await computeFeeForConnector(intent.amount, providerAccountId);
+        feeUpdate = { fee_amount: fee, net_amount: intent.amount - fee };
+      }
+
       const [updated] = await db('payment_intents').where({ id: intentId }).update({
         status: finalStatus,
         provider_payment_id: result.providerPaymentId,
         provider_response: result.providerResponseJson,
+        ...feeUpdate,
       }).returning('*');
 
       // Write outbox event
@@ -232,8 +243,16 @@ export class PaymentIntentService {
       intent.connector_account_id,
     );
 
+    // On capture success, record fee + net for payout reconciliation.
+    let feeUpdate: any = {};
+    if (captured) {
+      const fee = await computeFeeForConnector(intent.amount, intent.connector_account_id);
+      feeUpdate = { fee_amount: fee, net_amount: intent.amount - fee };
+    }
+
     const [updated] = await db('payment_intents').where({ id: intentId }).update({
       status: captured ? 'SUCCEEDED' : 'FAILED',
+      ...feeUpdate,
     }).returning('*');
 
     await db('outbox_events').insert({

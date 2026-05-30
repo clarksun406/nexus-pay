@@ -46,6 +46,18 @@ function squareBaseUrl(mode: string): string {
   return mode === 'LIVE' ? 'https://connect.squareup.com' : 'https://connect.squareupsandbox.com';
 }
 
+const BRAINTREE_API_VERSION = '2019-01-01';
+
+function braintreeUrl(mode: string): string {
+  return mode === 'LIVE'
+    ? 'https://payments.braintree-api.com/graphql'
+    : 'https://payments.sandbox.braintree-api.com/graphql';
+}
+
+function toDecimalAmount(minorUnits: number): string {
+  return (minorUnits / 100).toFixed(2);
+}
+
 class ProviderDispatcher {
   async charge(provider: string, req: ChargeRequest, accountId: string): Promise<ChargeResult> {
     const account = await db('provider_accounts').where({ id: accountId }).first();
@@ -59,7 +71,7 @@ class ProviderDispatcher {
       case 'SQUARE':
         return this.squareCharge(req, credentials, account.mode);
       case 'BRAINTREE':
-        return this.braintreeCharge(req, credentials);
+        return this.braintreeCharge(req, credentials, account.mode);
       default:
         return { success: false, failureCode: 'UNSUPPORTED_PROVIDER', failureMessage: `Provider ${provider} not supported` };
     }
@@ -76,6 +88,8 @@ class ProviderDispatcher {
           return this.stripeCapture(providerPaymentId, credentials);
         case 'SQUARE':
           return this.squareComplete(providerPaymentId, credentials, account.mode);
+        case 'BRAINTREE':
+          return this.braintreeCapture(providerPaymentId, credentials, account.mode);
         default:
           // Honest failure for providers without a capture implementation.
           return false;
@@ -96,6 +110,8 @@ class ProviderDispatcher {
           return this.stripeCancel(providerPaymentId, credentials);
         case 'SQUARE':
           return this.squareCancel(providerPaymentId, credentials, account.mode);
+        case 'BRAINTREE':
+          return this.braintreeCancel(providerPaymentId, credentials, account.mode);
         default:
           return false;
       }
@@ -119,7 +135,7 @@ class ProviderDispatcher {
       case 'SQUARE':
         return this.squareRefund(req, credentials, account.mode);
       case 'BRAINTREE':
-        return { success: false, failureCode: 'NOT_IMPLEMENTED', failureMessage: `Refunds for ${provider} are not yet implemented` };
+        return this.braintreeRefund(req, credentials, account.mode);
       default:
         return { success: false, failureCode: 'UNSUPPORTED_PROVIDER', failureMessage: `Provider ${provider} not supported` };
     }
@@ -424,10 +440,122 @@ class ProviderDispatcher {
     }
   }
 
-  // ── Braintree (not yet implemented) ──
+  // ── Braintree (GraphQL API) ──
 
-  private async braintreeCharge(_req: ChargeRequest, _creds: any): Promise<ChargeResult> {
-    return { success: false, failureCode: 'NOT_IMPLEMENTED', failureMessage: 'Braintree integration not yet configured' };
+  private braintreeConfigured(creds: any): boolean {
+    return !!(creds.publicKey && creds.privateKey);
+  }
+
+  private async braintreeGraphQL(
+    creds: any,
+    mode: string,
+    query: string,
+    variables: any,
+  ): Promise<{ ok: boolean; data?: any; errorCode?: string; errorMessage?: string }> {
+    const auth = Buffer.from(`${creds.publicKey}:${creds.privateKey}`).toString('base64');
+    const response = await fetch(braintreeUrl(mode), {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Braintree-Version': BRAINTREE_API_VERSION,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const json = await response.json();
+    if (!response.ok || (Array.isArray(json.errors) && json.errors.length > 0)) {
+      return {
+        ok: false,
+        errorCode: json.errors?.[0]?.extensions?.legacyCode || 'BRAINTREE_ERROR',
+        errorMessage: json.errors?.[0]?.message || `Braintree request failed (HTTP ${response.status})`,
+      };
+    }
+    return { ok: true, data: json.data };
+  }
+
+  private async braintreeCharge(req: ChargeRequest, creds: any, mode: string): Promise<ChargeResult> {
+    if (!this.braintreeConfigured(creds)) {
+      return { success: false, failureCode: 'NO_CREDENTIALS', failureMessage: 'Braintree publicKey/privateKey not configured' };
+    }
+
+    try {
+      const manual = req.captureMethod === 'MANUAL';
+      const op = manual ? 'authorizePaymentMethod' : 'chargePaymentMethod';
+      const inputType = manual ? 'AuthorizePaymentMethodInput' : 'ChargePaymentMethodInput';
+      const query = `mutation Pay($input: ${inputType}!) { ${op}(input: $input) { transaction { id status } } }`;
+
+      const transaction: any = { amount: toDecimalAmount(req.amount) };
+      if (creds.merchantAccountId) transaction.merchantAccountId = creds.merchantAccountId;
+
+      const res = await this.braintreeGraphQL(creds, mode, query, {
+        input: { paymentMethodId: req.paymentMethodId, transaction },
+      });
+      if (!res.ok) {
+        return { success: false, failureCode: res.errorCode, failureMessage: res.errorMessage };
+      }
+
+      const txn = res.data?.[op]?.transaction;
+      if (!txn) {
+        return { success: false, failureCode: 'BRAINTREE_ERROR', failureMessage: 'No transaction returned' };
+      }
+
+      const status: string = txn.status;
+      const successStatuses = ['AUTHORIZED', 'SUBMITTED_FOR_SETTLEMENT', 'SETTLING', 'SETTLEMENT_PENDING', 'SETTLED'];
+      if (successStatuses.includes(status)) {
+        return { success: true, providerStatus: status, providerPaymentId: txn.id, providerResponseJson: JSON.stringify(txn) };
+      }
+      return {
+        success: false,
+        providerStatus: status,
+        providerPaymentId: txn.id,
+        providerResponseJson: JSON.stringify(txn),
+        failureCode: `BRAINTREE_${status}`,
+        failureMessage: `Braintree transaction status: ${status}`,
+      };
+    } catch (err: any) {
+      return { success: false, failureCode: 'NETWORK_ERROR', failureMessage: err.message };
+    }
+  }
+
+  private async braintreeCapture(transactionId: string, creds: any, mode: string): Promise<boolean> {
+    if (!this.braintreeConfigured(creds)) return false;
+    const query = `mutation Capture($input: CaptureTransactionInput!) { captureTransaction(input: $input) { transaction { id status } } }`;
+    const res = await this.braintreeGraphQL(creds, mode, query, { input: { transactionId } });
+    return res.ok && !!res.data?.captureTransaction?.transaction;
+  }
+
+  private async braintreeCancel(transactionId: string, creds: any, mode: string): Promise<boolean> {
+    if (!this.braintreeConfigured(creds)) return false;
+    // reverseTransaction voids unsettled transactions (and refunds settled ones).
+    const query = `mutation Reverse($input: ReverseTransactionInput!) { reverseTransaction(input: $input) { reversal { __typename } } }`;
+    const res = await this.braintreeGraphQL(creds, mode, query, { input: { transactionId } });
+    return res.ok && !!res.data?.reverseTransaction?.reversal;
+  }
+
+  private async braintreeRefund(req: RefundRequest, creds: any, mode: string): Promise<RefundResult> {
+    if (!this.braintreeConfigured(creds)) {
+      return { success: false, failureCode: 'NO_CREDENTIALS', failureMessage: 'Braintree publicKey/privateKey not configured' };
+    }
+
+    try {
+      const input: any = { transactionId: req.providerPaymentId };
+      if (req.amount != null) input.refund = { amount: toDecimalAmount(req.amount) };
+
+      const query = `mutation Refund($input: RefundTransactionInput!) { refundTransaction(input: $input) { refund { id status } } }`;
+      const res = await this.braintreeGraphQL(creds, mode, query, { input });
+      if (!res.ok) {
+        return { success: false, failureCode: res.errorCode, failureMessage: res.errorMessage };
+      }
+
+      const refund = res.data?.refundTransaction?.refund;
+      if (!refund) {
+        return { success: false, failureCode: 'BRAINTREE_ERROR', failureMessage: 'No refund returned' };
+      }
+      return { success: true, providerRefundId: refund.id, providerResponseJson: JSON.stringify(refund) };
+    } catch (err: any) {
+      return { success: false, failureCode: 'NETWORK_ERROR', failureMessage: err.message };
+    }
   }
 }
 

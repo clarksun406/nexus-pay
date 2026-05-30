@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import {
   LayoutDashboard, CreditCard, RotateCcw, GitBranch,
   Key, Webhook, FileText, Users, Settings, ChevronRight, Plug, Link2, Zap, ShieldCheck,
+  AlertTriangle, Wallet,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -21,6 +22,8 @@ const nav: NavItem[] = [
   { href: '/overview', label: 'Overview', icon: LayoutDashboard },
   { href: '/payments', label: 'Payments', icon: CreditCard },
   { href: '/refunds', label: 'Refunds', icon: RotateCcw },
+  { href: '/disputes', label: 'Disputes', icon: AlertTriangle },
+  { href: '/payouts', label: 'Payouts', icon: Wallet },
   { href: '/routing/rules', label: 'Routing Rules', icon: GitBranch },
   { href: '/connectors', label: 'Connectors', icon: Plug },
   { href: '/payment-links', label: 'Payment Links', icon: Link2 },

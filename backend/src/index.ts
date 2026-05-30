@@ -13,7 +13,9 @@ import publicRoutes from './routes/public.routes';
 import meRoutes from './routes/me.routes';
 import inboundWebhookRoutes from './routes/webhook-inbound.routes';
 import { webhookWorker } from './services/webhook-worker';
+import { payoutWorker } from './services/payout.service';
 import { assertEncryptionKey } from './utils/crypto';
+import { ipRateLimit, apiKeyRateLimit } from './middleware/rate-limit';
 
 const app = express();
 
@@ -40,13 +42,13 @@ app.get('/actuator/prometheus', (_req, res) => {
 });
 
 // API routes
-app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/payment-intents', paymentIntentRoutes);
+app.use('/api/v1/auth', ipRateLimit('auth', 20, 60_000), authRoutes);
+app.use('/api/v1/payment-intents', apiKeyRateLimit(120, 60_000), paymentIntentRoutes);
 app.use('/api/v1/merchants', merchantRoutes);
 app.use('/api/v1/me', meRoutes);
 
 // Public routes
-app.use('/pub', publicRoutes);
+app.use('/pub', ipRateLimit('pub', 60, 60_000), publicRoutes);
 
 // 404 handler
 app.use((_req, res) => {
@@ -72,6 +74,11 @@ app.listen(config.port, () => {
   // Start the background webhook delivery engine (outbox -> endpoints).
   if (process.env.WEBHOOK_WORKER_ENABLED !== 'false') {
     webhookWorker.start();
+  }
+
+  // Start the daily payout reconciliation worker.
+  if (process.env.PAYOUT_WORKER_ENABLED !== 'false') {
+    payoutWorker.start();
   }
 });
 
