@@ -112,27 +112,39 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
+    let payload: any;
     try {
-      const payload = verifyToken(refreshToken);
-      if (payload.type !== 'refresh') {
-        throw new Error('Not a refresh token');
-      }
-
-      const user = await db('users').where({ id: payload.userId, status: 'ACTIVE' }).first();
-      if (!user || user.token_version !== payload.tokenVersion) {
-        throw new Error('Token revoked');
-      }
-
-      return this.buildAuthResponse(user);
+      payload = verifyToken(refreshToken);
     } catch {
       throw Object.assign(new Error('Invalid refresh token'), { status: 401 });
     }
+    if (payload.type !== 'refresh') {
+      throw Object.assign(new Error('Invalid refresh token'), { status: 401 });
+    }
+
+    const user = await db('users').where({ id: payload.userId, status: 'ACTIVE' }).first();
+    if (!user || user.token_version !== payload.tokenVersion) {
+      throw Object.assign(new Error('Refresh token revoked'), { status: 401 });
+    }
+
+    // Verify the token exists, is not revoked and is not expired.
+    const tokenHash = hashSha256(refreshToken);
+    const stored = await db('refresh_tokens').where({ token_hash: tokenHash }).first();
+    if (!stored || stored.revoked || new Date(stored.expires_at).getTime() < Date.now()) {
+      throw Object.assign(new Error('Refresh token revoked or expired'), { status: 401 });
+    }
+
+    // Rotation: invalidate the presented token before issuing a new one.
+    await db('refresh_tokens').where({ id: stored.id }).update({ revoked: true });
+
+    return this.buildAuthResponse(user);
   }
 
   async logout(refreshToken: string) {
     try {
       const payload = verifyToken(refreshToken);
-      // Increment token version to invalidate all tokens
+      // Revoke the presented refresh token and invalidate all access tokens.
+      await db('refresh_tokens').where({ token_hash: hashSha256(refreshToken) }).update({ revoked: true });
       await db('users').where({ id: payload.userId }).increment('token_version', 1);
     } catch {
       // Ignore invalid tokens
@@ -186,6 +198,14 @@ export class AuthService {
     const authUser: AuthUser = { userId: user.id, email: user.email };
     const accessToken = generateAccessToken(authUser, user.token_version);
     const refreshToken = generateRefreshToken(authUser, user.token_version);
+
+    // Persist the refresh token (hashed) so it can be rotated/revoked.
+    await db('refresh_tokens').insert({
+      user_id: user.id,
+      token_hash: hashSha256(refreshToken),
+      expires_at: new Date(Date.now() + config.jwt.refreshTokenExpiryMs),
+      revoked: false,
+    });
 
     // Get memberships
     const memberships = await this.getMemberships(user.id);
