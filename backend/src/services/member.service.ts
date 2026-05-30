@@ -1,6 +1,7 @@
 import db from '../db/connection';
 import { config } from '../config';
 import { generateToken, hashSha256, INVITE_PASSWORD_SENTINEL } from '../utils/crypto';
+import { emailService } from './email.service';
 
 const VALID_ROLES = ['OWNER', 'ADMIN', 'DEVELOPER', 'FINANCE', 'VIEWER'];
 
@@ -85,6 +86,20 @@ export class MemberService {
 
     const inviteUrl = `${config.payBaseUrl}/accept-invite?token=${rawToken}`;
 
+    // Best-effort email delivery; we still return the URL so the dashboard
+    // can display it (useful in dev / when SMTP isn't configured).
+    let inviterEmail: string | null = null;
+    try {
+      const inviter = await db('users').where({ id: invitedBy }).first();
+      inviterEmail = inviter?.email || null;
+    } catch { /* ignore */ }
+    let merchantName = 'this merchant';
+    try {
+      const merchant = await db('merchants').where({ id: merchantId }).first();
+      if (merchant?.name) merchantName = merchant.name;
+    } catch { /* ignore */ }
+    const emailResult = await emailService.sendInvite(email, inviteUrl, inviterEmail, merchantName);
+
     return {
       id: membership.id,
       userId: user.id,
@@ -94,6 +109,7 @@ export class MemberService {
       isNewUser,
       inviteToken: rawToken,
       inviteUrl,
+      emailDelivered: emailResult.delivered,
       expiresAt: new Date(Date.now() + config.invite.tokenExpiryMs).toISOString(),
     };
   }

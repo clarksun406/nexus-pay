@@ -32,6 +32,16 @@ export const config = {
     secretKey: process.env.STRIPE_SECRET_KEY || '',
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
   },
+  smtp: {
+    host: process.env.SMTP_HOST || '',
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    user: process.env.SMTP_USER || '',
+    password: process.env.SMTP_PASSWORD || '',
+    from: process.env.SMTP_FROM || 'NexusPay <no-reply@nexuspay.local>',
+  },
+  passwordReset: {
+    tokenExpiryMs: parseInt(process.env.PASSWORD_RESET_TOKEN_EXPIRY_MS || '3600000'), // 1h
+  },
   logs: {
     retentionPeriods: parseInt(process.env.LOG_RETENTION_PERIODS || '4'),
   },

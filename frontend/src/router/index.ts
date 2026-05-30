@@ -23,6 +23,18 @@ const router = createRouter({
       meta: { public: true },
     },
     {
+      path: '/forgot-password',
+      name: 'forgot-password',
+      component: () => import('@/pages/ForgotPassword.vue'),
+      meta: { guest: true },
+    },
+    {
+      path: '/reset-password',
+      name: 'reset-password',
+      component: () => import('@/pages/ResetPassword.vue'),
+      meta: { public: true },
+    },
+    {
       path: '/pay/:token',
       name: 'pay',
       component: () => import('@/pages/Pay.vue'),

@@ -41,9 +41,32 @@ export class PaymentIntentService {
     return this.toResponse(intent);
   }
 
-  async list(merchantId: string, mode?: string, page = 0, size = 20) {
+  async list(merchantId: string, mode?: string, page = 0, size = 20, filters: {
+    status?: string;
+    orderId?: string;
+    minAmount?: number;
+    maxAmount?: number;
+    createdFrom?: Date;
+    createdTo?: Date;
+    search?: string; // substring match on id / order_id / description
+  } = {}) {
     let query = db('payment_intents').where({ merchant_id: merchantId });
     if (mode) query = query.where({ mode });
+    if (filters.status) query = query.where({ status: filters.status.toUpperCase() });
+    if (filters.orderId) query = query.where({ order_id: filters.orderId });
+    if (filters.minAmount != null) query = query.where('amount', '>=', filters.minAmount);
+    if (filters.maxAmount != null) query = query.where('amount', '<=', filters.maxAmount);
+    if (filters.createdFrom) query = query.where('created_at', '>=', filters.createdFrom);
+    if (filters.createdTo) query = query.where('created_at', '<=', filters.createdTo);
+    if (filters.search) {
+      const term = `%${filters.search}%`;
+      query = query.where((qb) => {
+        qb.whereRaw('CAST(id AS TEXT) ILIKE ?', [term])
+          .orWhere('order_id', 'ilike', term)
+          .orWhere('description', 'ilike', term)
+          .orWhere('provider_payment_id', 'ilike', term);
+      });
+    }
 
     const [{ count }] = await query.clone().count();
     const content = await query

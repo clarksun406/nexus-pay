@@ -9,6 +9,7 @@ import {
   AuthUser,
 } from '../middleware/auth';
 import { config } from '../config';
+import { emailService } from './email.service';
 
 export class AuthService {
   async register(email: string, password: string, merchantName?: string) {
@@ -205,6 +206,76 @@ export class AuthService {
 
     const freshUser = await db('users').where({ id: user.id }).first();
     return this.buildAuthResponse(freshUser);
+  }
+
+  /**
+   * Initiate a password reset. Always succeeds at the API surface (returns
+   * the same shape regardless of whether the email exists) to prevent
+   * account enumeration. Internally, we issue a single-use token and
+   * email it; previous unused tokens for the user are invalidated.
+   */
+  async requestPasswordReset(emailRaw: string): Promise<void> {
+    const email = (emailRaw || '').toLowerCase().trim();
+    if (!email) return;
+
+    const user = await db('users').where({ email, status: 'ACTIVE' }).first();
+    if (!user) return;
+
+    // Don't allow resets for invite-only users who haven't set a password.
+    if (user.password_hash === INVITE_PASSWORD_SENTINEL) return;
+
+    await db('password_reset_tokens')
+      .where({ user_id: user.id, used: false })
+      .update({ used: true });
+
+    const rawToken = generateToken();
+    await db('password_reset_tokens').insert({
+      user_id: user.id,
+      token_hash: hashSha256(rawToken),
+      expires_at: new Date(Date.now() + config.passwordReset.tokenExpiryMs),
+    });
+
+    const resetUrl = `${config.payBaseUrl}/reset-password?token=${rawToken}`;
+    await emailService.sendPasswordReset(email, resetUrl);
+  }
+
+  async resetPassword(token: string, newPassword: string) {
+    if (!token || !newPassword || newPassword.length < 8) {
+      throw Object.assign(new Error('A token and a password of at least 8 characters are required'), { status: 400 });
+    }
+
+    const tokenHash = hashSha256(token);
+    const row = await db('password_reset_tokens').where({ token_hash: tokenHash, used: false }).first();
+    if (!row) {
+      throw Object.assign(new Error('Invalid or already-used reset token'), { status: 400 });
+    }
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      throw Object.assign(new Error('Reset token has expired'), { status: 400 });
+    }
+
+    const user = await db('users').where({ id: row.user_id }).first();
+    if (!user) throw Object.assign(new Error('User not found'), { status: 404 });
+
+    const passwordHash = await hashPassword(newPassword);
+    const trx = await db.transaction();
+    try {
+      await trx('users').where({ id: user.id }).update({ password_hash: passwordHash });
+      // Invalidate every refresh token / access token by bumping token_version.
+      await trx('users').where({ id: user.id }).increment('token_version', 1);
+      await trx('refresh_tokens').where({ user_id: user.id }).update({ revoked: true });
+      await trx('password_reset_tokens').where({ id: row.id }).update({ used: true });
+      // Burn any other outstanding reset tokens for this user too.
+      await trx('password_reset_tokens')
+        .where({ user_id: user.id, used: false })
+        .update({ used: true });
+      await trx.commit();
+    } catch (err) {
+      await trx.rollback();
+      throw err;
+    }
+
+    const fresh = await db('users').where({ id: user.id }).first();
+    return this.buildAuthResponse(fresh);
   }
 
   async buildAuthResponse(user: any) {
