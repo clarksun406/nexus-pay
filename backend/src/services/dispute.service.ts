@@ -107,6 +107,76 @@ export class DisputeService {
     return { id, created };
   }
 
+  /**
+   * Generic insert/update of a dispute record from a non-Stripe provider.
+   * The caller resolves the connector and the matching PaymentIntent (if any)
+   * and passes them in.
+   */
+  async upsertGeneric(args: {
+    provider: string;
+    providerDisputeId: string;
+    intent: any | null;
+    merchantId: string;
+    mode: string;
+    amount: number;
+    currency: string;
+    reason?: string;
+    status: string;
+    evidenceDueBy?: string | null;
+    payload: any;
+    eventType: string;
+  }): Promise<{ id: string; created: boolean } | null> {
+    if (!args.providerDisputeId) return null;
+
+    const fields = {
+      merchant_id: args.merchantId,
+      payment_intent_id: args.intent?.id || null,
+      mode: args.mode,
+      provider: args.provider.toUpperCase(),
+      provider_dispute_id: args.providerDisputeId,
+      amount: args.amount,
+      currency: (args.currency || 'USD').toUpperCase(),
+      reason: args.reason,
+      status: args.status,
+      evidence_due_by: args.evidenceDueBy ?? null,
+      provider_payload: JSON.stringify(args.payload),
+    };
+
+    const existing = await db('disputes')
+      .where({ provider: fields.provider, provider_dispute_id: args.providerDisputeId })
+      .first();
+
+    let id: string;
+    let created = false;
+    if (existing) {
+      const [updated] = await db('disputes').where({ id: existing.id }).update(fields).returning('id');
+      id = updated.id;
+    } else {
+      const [inserted] = await db('disputes').insert(fields).returning('id');
+      id = inserted.id;
+      created = true;
+    }
+
+    const merchantEventType = created ? 'dispute.created' : `dispute.${args.status.toLowerCase()}`;
+    await db('outbox_events').insert({
+      merchant_id: args.merchantId,
+      event_type: merchantEventType,
+      resource_id: id,
+      payload: JSON.stringify({
+        id,
+        paymentIntentId: args.intent?.id || null,
+        amount: fields.amount,
+        currency: fields.currency,
+        reason: fields.reason,
+        status: fields.status,
+        evidenceDueBy: fields.evidence_due_by,
+        provider: fields.provider,
+      }),
+    });
+
+    return { id, created };
+  }
+
   async list(merchantId: string, mode?: string, page = 0, size = 20) {
     let query = db('disputes').where({ merchant_id: merchantId });
     if (mode) query = query.where({ mode });

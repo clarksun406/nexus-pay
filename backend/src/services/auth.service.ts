@@ -66,27 +66,39 @@ export class AuthService {
       throw Object.assign(new Error('Invalid credentials'), { status: 401 });
     }
 
-    // If MFA is enabled, return a session token instead of full auth
+    // If MFA is enabled, return a session token instead of full auth.
+    // The session is persisted in `mfa_sessions` so it survives restarts
+    // and is shared across instances; only the SHA-256 hash is stored.
     if (user.mfa_enabled) {
       const mfaSessionToken = generateToken();
-      // Store temporarily (5 min TTL) - using a simple in-memory store for now
-      this.mfaSessions.set(mfaSessionToken, { userId: user.id, expires: Date.now() + 300000 });
+      await db('mfa_sessions').insert({
+        user_id: user.id,
+        token_hash: hashSha256(mfaSessionToken),
+        expires_at: new Date(Date.now() + AuthService.MFA_SESSION_TTL_MS),
+      });
       return { mfaRequired: true, mfaSessionToken };
     }
 
     return this.buildAuthResponse(user);
   }
 
-  private mfaSessions = new Map<string, { userId: string; expires: number }>();
+  private static readonly MFA_SESSION_TTL_MS = 5 * 60 * 1000;
 
   async verifyMfa(mfaSessionToken: string, code: string) {
-    const session = this.mfaSessions.get(mfaSessionToken);
-    if (!session || session.expires < Date.now()) {
-      this.mfaSessions.delete(mfaSessionToken);
+    // Opportunistic TTL sweep so the table stays small without a worker.
+    await db('mfa_sessions').where('expires_at', '<', new Date()).delete();
+
+    const tokenHash = hashSha256(mfaSessionToken);
+    const session = await db('mfa_sessions').where({ token_hash: tokenHash }).first();
+    if (!session) {
+      throw Object.assign(new Error('MFA session expired'), { status: 401 });
+    }
+    if (new Date(session.expires_at).getTime() < Date.now()) {
+      await db('mfa_sessions').where({ id: session.id }).delete();
       throw Object.assign(new Error('MFA session expired'), { status: 401 });
     }
 
-    const user = await db('users').where({ id: session.userId }).first();
+    const user = await db('users').where({ id: session.user_id }).first();
     if (!user) {
       throw Object.assign(new Error('User not found'), { status: 404 });
     }
@@ -107,7 +119,8 @@ export class AuthService {
       }
     }
 
-    this.mfaSessions.delete(mfaSessionToken);
+    // One-shot: consume the session whether verification used TOTP or a backup code.
+    await db('mfa_sessions').where({ id: session.id }).delete();
     return this.buildAuthResponse(user);
   }
 
