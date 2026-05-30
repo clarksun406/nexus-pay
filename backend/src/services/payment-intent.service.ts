@@ -229,7 +229,7 @@ export class PaymentIntentService {
     return this.toResponse(updated);
   }
 
-  private toResponse(intent: any) {
+  toResponse(intent: any) {
     return {
       id: intent.id,
       merchantId: intent.merchant_id,

@@ -12,8 +12,23 @@ export class RefundService {
     }
 
     const refundAmount = body.amount || intent.amount;
+    if (refundAmount <= 0) {
+      throw Object.assign(new Error('Refund amount must be positive'), { status: 400 });
+    }
     if (refundAmount > intent.amount) {
       throw Object.assign(new Error('Refund amount exceeds payment amount'), { status: 400 });
+    }
+
+    // Guard against over-refunding across multiple partial refunds.
+    const [{ sum }] = await db('refunds')
+      .where({ payment_intent_id: intentId, status: 'SUCCEEDED' })
+      .sum('amount as sum');
+    const alreadyRefunded = parseInt((sum as string) || '0', 10) || 0;
+    if (alreadyRefunded + refundAmount > intent.amount) {
+      throw Object.assign(
+        new Error(`Refund exceeds remaining refundable amount (${intent.amount - alreadyRefunded})`),
+        { status: 400 },
+      );
     }
 
     const [refund] = await db('refunds').insert({
@@ -26,10 +41,26 @@ export class RefundService {
       status: 'PENDING',
     }).returning('*');
 
-    // Call provider for refund
+    // Call the provider to perform the actual refund.
     try {
-      // In a real implementation, this would call the provider's refund API
-      await db('refunds').where({ id: refund.id }).update({ status: 'SUCCEEDED' });
+      const result = await providerDispatcher.refund(
+        intent.resolved_provider,
+        { providerPaymentId: intent.provider_payment_id, amount: refundAmount },
+        intent.connector_account_id,
+      );
+
+      if (result.success) {
+        await db('refunds').where({ id: refund.id }).update({
+          status: 'SUCCEEDED',
+          provider_refund_id: result.providerRefundId,
+        });
+      } else {
+        await db('refunds').where({ id: refund.id }).update({
+          status: 'FAILED',
+          provider_refund_id: result.providerRefundId,
+          failure_reason: result.failureMessage || result.failureCode || 'Refund failed',
+        });
+      }
     } catch (err: any) {
       await db('refunds').where({ id: refund.id }).update({
         status: 'FAILED',
@@ -38,6 +69,15 @@ export class RefundService {
     }
 
     const updated = await db('refunds').where({ id: refund.id }).first();
+
+    // Emit an outbox event so subscribed webhook endpoints get notified.
+    await db('outbox_events').insert({
+      merchant_id: merchantId,
+      event_type: updated.status === 'SUCCEEDED' ? 'refund.succeeded' : 'refund.failed',
+      resource_id: refund.id,
+      payload: JSON.stringify(this.toResponse(updated)),
+    });
+
     return this.toResponse(updated);
   }
 

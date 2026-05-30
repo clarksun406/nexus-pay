@@ -6,6 +6,13 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 const TAG_LENGTH = 16;
 
+/**
+ * Placeholder password hash for users created via invitation who have not yet
+ * set a password. It is intentionally not a valid bcrypt hash, so password
+ * comparison always fails until the invite is accepted.
+ */
+export const INVITE_PASSWORD_SENTINEL = '!nexuspay-invite-pending!';
+
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12);
 }
