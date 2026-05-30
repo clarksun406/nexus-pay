@@ -29,6 +29,11 @@ const mfaConfirmSchema = z.object({
   code: z.string(),
 });
 
+const acceptInviteSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8).optional(),
+});
+
 // POST /api/v1/auth/register
 router.post('/register', async (req: Request, res: Response) => {
   try {
@@ -73,6 +78,18 @@ router.post('/logout', async (req: Request, res: Response) => {
     res.status(204).send();
   } catch (err: any) {
     res.status(204).send(); // Always succeed
+  }
+});
+
+// POST /api/v1/auth/accept-invite
+router.post('/accept-invite', async (req: Request, res: Response) => {
+  try {
+    const body = acceptInviteSchema.parse(req.body);
+    const result = await authService.acceptInvite(body.token, body.password);
+    res.json(result);
+  } catch (err: any) {
+    const status = err.status || (err.name === 'ZodError' ? 400 : 500);
+    res.status(status).json({ title: 'Error', detail: err.message });
   }
 });
 

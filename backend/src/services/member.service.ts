@@ -1,4 +1,8 @@
 import db from '../db/connection';
+import { config } from '../config';
+import { generateToken, hashSha256, INVITE_PASSWORD_SENTINEL } from '../utils/crypto';
+
+const VALID_ROLES = ['OWNER', 'ADMIN', 'DEVELOPER', 'FINANCE', 'VIEWER'];
 
 export class MemberService {
   async list(merchantId: string) {
@@ -17,6 +21,81 @@ export class MemberService {
       invitedBy: m.invited_by,
       createdAt: m.created_at,
     }));
+  }
+
+  async invite(merchantId: string, emailRaw: string, role: string, invitedBy: string) {
+    const email = (emailRaw || '').toLowerCase().trim();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw Object.assign(new Error('A valid email is required'), { status: 400 });
+    }
+    if (!VALID_ROLES.includes(role)) {
+      throw Object.assign(new Error('Invalid role'), { status: 400 });
+    }
+    if (role === 'OWNER') {
+      throw Object.assign(new Error('Cannot invite a member as OWNER'), { status: 400 });
+    }
+
+    // Find or create the target user.
+    let user = await db('users').where({ email }).first();
+    let isNewUser = false;
+    if (!user) {
+      [user] = await db('users')
+        .insert({ email, password_hash: INVITE_PASSWORD_SENTINEL, status: 'PENDING_INVITE' })
+        .returning('*');
+      isNewUser = true;
+    }
+
+    // Find or (re)create the membership.
+    const existing = await db('merchant_users')
+      .where({ user_id: user.id, merchant_id: merchantId })
+      .first();
+    if (existing && existing.status === 'ACTIVE') {
+      throw Object.assign(new Error('User is already an active member'), { status: 409 });
+    }
+
+    let membership: any;
+    if (existing) {
+      [membership] = await db('merchant_users')
+        .where({ id: existing.id })
+        .update({ role, status: 'PENDING_INVITE', invited_by: invitedBy })
+        .returning('*');
+    } else {
+      [membership] = await db('merchant_users')
+        .insert({
+          user_id: user.id,
+          merchant_id: merchantId,
+          role,
+          status: 'PENDING_INVITE',
+          invited_by: invitedBy,
+        })
+        .returning('*');
+    }
+
+    // Issue a fresh invite token, invalidating any prior pending ones.
+    await db('invite_tokens')
+      .where({ merchant_user_id: membership.id, used: false })
+      .update({ used: true });
+
+    const rawToken = generateToken();
+    await db('invite_tokens').insert({
+      merchant_user_id: membership.id,
+      token_hash: hashSha256(rawToken),
+      expires_at: new Date(Date.now() + config.invite.tokenExpiryMs),
+    });
+
+    const inviteUrl = `${config.payBaseUrl}/accept-invite?token=${rawToken}`;
+
+    return {
+      id: membership.id,
+      userId: user.id,
+      email,
+      role,
+      status: membership.status,
+      isNewUser,
+      inviteToken: rawToken,
+      inviteUrl,
+      expiresAt: new Date(Date.now() + config.invite.tokenExpiryMs).toISOString(),
+    };
   }
 
   async updateRole(merchantId: string, memberId: string, role: string) {

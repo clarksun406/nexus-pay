@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { authenticator } from 'otplib';
 import db from '../db/connection';
-import { hashPassword, comparePassword, hashSha256, generateToken } from '../utils/crypto';
+import { hashPassword, comparePassword, hashSha256, generateToken, INVITE_PASSWORD_SENTINEL } from '../utils/crypto';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -137,6 +137,49 @@ export class AuthService {
     } catch {
       // Ignore invalid tokens
     }
+  }
+
+  async acceptInvite(token: string, password?: string) {
+    const tokenHash = hashSha256(token);
+    const invite = await db('invite_tokens').where({ token_hash: tokenHash, used: false }).first();
+    if (!invite) {
+      throw Object.assign(new Error('Invalid or already-used invite token'), { status: 400 });
+    }
+    if (new Date(invite.expires_at).getTime() < Date.now()) {
+      throw Object.assign(new Error('Invite token has expired'), { status: 400 });
+    }
+
+    const membership = await db('merchant_users').where({ id: invite.merchant_user_id }).first();
+    if (!membership) {
+      throw Object.assign(new Error('Invitation target no longer exists'), { status: 404 });
+    }
+    const user = await db('users').where({ id: membership.user_id }).first();
+    if (!user) {
+      throw Object.assign(new Error('User not found'), { status: 404 });
+    }
+
+    const needsPassword =
+      user.password_hash === INVITE_PASSWORD_SENTINEL || user.status === 'PENDING_INVITE';
+
+    const trx = await db.transaction();
+    try {
+      if (needsPassword) {
+        if (!password || password.length < 8) {
+          throw Object.assign(new Error('A password of at least 8 characters is required'), { status: 400 });
+        }
+        const passwordHash = await hashPassword(password);
+        await trx('users').where({ id: user.id }).update({ password_hash: passwordHash, status: 'ACTIVE' });
+      }
+      await trx('merchant_users').where({ id: membership.id }).update({ status: 'ACTIVE' });
+      await trx('invite_tokens').where({ id: invite.id }).update({ used: true });
+      await trx.commit();
+    } catch (err) {
+      await trx.rollback();
+      throw err;
+    }
+
+    const freshUser = await db('users').where({ id: user.id }).first();
+    return this.buildAuthResponse(freshUser);
   }
 
   async buildAuthResponse(user: any) {

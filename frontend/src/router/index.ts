@@ -17,6 +17,12 @@ const router = createRouter({
       meta: { guest: true },
     },
     {
+      path: '/accept-invite',
+      name: 'accept-invite',
+      component: () => import('@/pages/AcceptInvite.vue'),
+      meta: { public: true },
+    },
+    {
       path: '/pay/:token',
       name: 'pay',
       component: () => import('@/pages/Pay.vue'),

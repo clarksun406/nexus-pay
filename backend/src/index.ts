@@ -11,12 +11,19 @@ import paymentIntentRoutes from './routes/payment-intent.routes';
 import merchantRoutes from './routes/merchant.routes';
 import publicRoutes from './routes/public.routes';
 import meRoutes from './routes/me.routes';
+import inboundWebhookRoutes from './routes/webhook-inbound.routes';
+import { webhookWorker } from './services/webhook-worker';
 
 const app = express();
 
 // Middleware
 app.use(helmet());
 app.use(cors({ origin: config.cors.origins, credentials: true }));
+
+// Inbound provider webhooks must be mounted BEFORE the JSON body parser so the
+// raw request body is available for signature verification.
+app.use('/webhooks', inboundWebhookRoutes);
+
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('short'));
 app.use(requestLogger);
@@ -57,6 +64,11 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(config.port, () => {
   console.log(`NexusPay backend running on port ${config.port}`);
   console.log(`Health: http://localhost:${config.port}/health`);
+
+  // Start the background webhook delivery engine (outbox -> endpoints).
+  if (process.env.WEBHOOK_WORKER_ENABLED !== 'false') {
+    webhookWorker.start();
+  }
 });
 
 export default app;
