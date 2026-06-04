@@ -20,9 +20,7 @@ class BinRoutingService {
 
     const candidates = [bin.slice(0, 8), bin.slice(0, 6)];
     for (const prefix of candidates) {
-      const row = await db('card_bin_registry')
-        .where({ bin_prefix: prefix, status: 'ACTIVE' })
-        .first();
+      const row = await db('card_bin_registry').where({ bin_prefix: prefix, status: 'ACTIVE' }).first();
       if (row) {
         return this.toBinInfo(row);
       }
@@ -41,9 +39,7 @@ class BinRoutingService {
     issuerCountry?: string;
     preferredProvider?: string;
   }): Promise<BinInfo> {
-    const existing = await db('card_bin_registry')
-      .where({ bin_prefix: data.binPrefix })
-      .first();
+    const existing = await db('card_bin_registry').where({ bin_prefix: data.binPrefix }).first();
 
     if (existing) {
       await db('card_bin_registry').where({ id: existing.id }).update({
@@ -85,13 +81,19 @@ class BinRoutingService {
     const delta = (success ? 100 : 0) - currentRate;
     const newRate = Math.max(0, Math.min(100, currentRate + delta / newSampleSize));
 
-    const perf: Record<string, { successRate: number; avgLatency: number; samples?: number }> =
-      row.provider_performance ? (typeof row.provider_performance === 'string' ? JSON.parse(row.provider_performance) : row.provider_performance) : {};
+    const perf: Record<string, { successRate: number; avgLatency: number; samples?: number }> = row.provider_performance
+      ? typeof row.provider_performance === 'string'
+        ? JSON.parse(row.provider_performance)
+        : row.provider_performance
+      : {};
 
     const cur = perf[provider] || { successRate: 100, avgLatency: 0, samples: 0 };
     const curSamples = (cur.samples || 0) + 1;
     cur.avgLatency = Math.round(((cur.avgLatency || 0) * (curSamples - 1) + latencyMs) / curSamples);
-    cur.successRate = Math.max(0, Math.min(100, (cur.successRate || 100) + ((success ? 100 : 0) - (cur.successRate || 100)) / curSamples));
+    cur.successRate = Math.max(
+      0,
+      Math.min(100, (cur.successRate || 100) + ((success ? 100 : 0) - (cur.successRate || 100)) / curSamples)
+    );
     cur.samples = curSamples;
     perf[provider] = cur;
 
@@ -100,20 +102,22 @@ class BinRoutingService {
     let bestScore = -1;
     for (const [p, v] of Object.entries(perf)) {
       // Score: 70% success rate + 30% inverse latency (normalize 3000ms -> 0)
-      const score = v.successRate * 0.7 + Math.max(0, 100 - (v.avgLatency / 30)) * 0.3;
+      const score = v.successRate * 0.7 + Math.max(0, 100 - v.avgLatency / 30) * 0.3;
       if (score > bestScore) {
         bestScore = score;
         bestProvider = p;
       }
     }
 
-    await db('card_bin_registry').where({ id: row.id }).update({
-      success_rate: newRate,
-      sample_size: newSampleSize,
-      provider_performance: JSON.stringify(perf),
-      preferred_provider: bestProvider,
-      updated_at: new Date(),
-    });
+    await db('card_bin_registry')
+      .where({ id: row.id })
+      .update({
+        success_rate: newRate,
+        sample_size: newSampleSize,
+        provider_performance: JSON.stringify(perf),
+        preferred_provider: bestProvider,
+        updated_at: new Date(),
+      });
   }
 
   /**
@@ -153,7 +157,10 @@ class BinRoutingService {
   async list(filter?: { network?: string; limit?: number; offset?: number }): Promise<BinInfo[]> {
     let query = db('card_bin_registry').where({ status: 'ACTIVE' });
     if (filter?.network) query = query.where({ card_network: filter.network });
-    query = query.orderBy('bin_prefix').limit(filter?.limit || 50).offset(filter?.offset || 0);
+    query = query
+      .orderBy('bin_prefix')
+      .limit(filter?.limit || 50)
+      .offset(filter?.offset || 0);
     const rows = await query;
     return rows.map((r: any) => this.toBinInfo(r));
   }
@@ -168,7 +175,9 @@ class BinRoutingService {
       preferredProvider: row.preferred_provider,
       successRate: parseFloat(row.success_rate) || 100,
       providerPerformance: row.provider_performance
-        ? (typeof row.provider_performance === 'string' ? JSON.parse(row.provider_performance) : row.provider_performance)
+        ? typeof row.provider_performance === 'string'
+          ? JSON.parse(row.provider_performance)
+          : row.provider_performance
         : {},
     };
   }
