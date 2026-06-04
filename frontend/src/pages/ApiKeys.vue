@@ -34,6 +34,21 @@ async function revokeKey(id: string) {
   } catch {}
 }
 
+async function rotateKey(id: string) {
+  if (!confirm('Rotate this API key? The current value will be revoked immediately and a new one issued. Update your integrations promptly.')) return
+  try {
+    const { data } = await api.post(`/api/v1/merchants/${auth.activeMerchantId}/api-keys/${id}/rotate`)
+    // Reuse the new-key reveal banner.
+    const dummyKey = { id: data.id, key: data.key, name: data.name, mode: data.mode, type: data.type }
+    newKeys.value = data.type === 'SECRET'
+      ? { secretKey: dummyKey, publishableKey: { key: '(unchanged — only the rotated key is shown)' } }
+      : { publishableKey: dummyKey, secretKey: { key: '(unchanged — only the rotated key is shown)' } }
+    fetchKeys()
+  } catch (err: any) {
+    alert(err.response?.data?.detail || 'Rotation failed')
+  }
+}
+
 onMounted(fetchKeys)
 </script>
 
@@ -93,6 +108,7 @@ onMounted(fetchKeys)
             <td class="px-6 py-3 font-mono text-xs">{{ k.prefix }}...</td>
             <td class="px-6 py-3 text-gray-500">{{ k.lastUsedAt ? format(new Date(k.lastUsedAt), 'MMM d, HH:mm') : 'Never' }}</td>
             <td class="px-6 py-3">
+              <button @click="rotateKey(k.id)" class="text-indigo-600 hover:text-indigo-800 text-xs mr-3">Rotate</button>
               <button @click="revokeKey(k.id)" class="text-red-500 hover:text-red-700 text-xs">Revoke</button>
             </td>
           </tr>

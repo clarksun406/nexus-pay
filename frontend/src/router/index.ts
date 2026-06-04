@@ -17,6 +17,24 @@ const router = createRouter({
       meta: { guest: true },
     },
     {
+      path: '/accept-invite',
+      name: 'accept-invite',
+      component: () => import('@/pages/AcceptInvite.vue'),
+      meta: { public: true },
+    },
+    {
+      path: '/forgot-password',
+      name: 'forgot-password',
+      component: () => import('@/pages/ForgotPassword.vue'),
+      meta: { guest: true },
+    },
+    {
+      path: '/reset-password',
+      name: 'reset-password',
+      component: () => import('@/pages/ResetPassword.vue'),
+      meta: { public: true },
+    },
+    {
       path: '/pay/:token',
       name: 'pay',
       component: () => import('@/pages/Pay.vue'),
@@ -32,6 +50,8 @@ const router = createRouter({
         { path: 'payments', name: 'payments', component: () => import('@/pages/Payments.vue') },
         { path: 'payments/:id', name: 'payment-detail', component: () => import('@/pages/PaymentDetail.vue') },
         { path: 'refunds', name: 'refunds', component: () => import('@/pages/Refunds.vue') },
+        { path: 'disputes', name: 'disputes', component: () => import('@/pages/Disputes.vue') },
+        { path: 'payouts', name: 'payouts', component: () => import('@/pages/Payouts.vue') },
         { path: 'routing/rules', name: 'routing-rules', component: () => import('@/pages/RoutingRules.vue') },
         { path: 'connectors', name: 'connectors', component: () => import('@/pages/Connectors.vue') },
         { path: 'payment-links', name: 'payment-links', component: () => import('@/pages/PaymentLinks.vue') },

@@ -16,12 +16,22 @@ import retryRoutes from './routes/retry.routes';
 import healthRoutes from './routes/health.routes';
 import reconciliationRoutes from './routes/reconciliation.routes';
 import threedsRoutes from './routes/threeds.routes';
+import inboundWebhookRoutes from './routes/webhook-inbound.routes';
+import { webhookWorker } from './services/webhook-worker';
+import { payoutWorker } from './services/payout.service';
+import { assertEncryptionKey } from './utils/crypto';
+import { ipRateLimit, apiKeyRateLimit } from './middleware/rate-limit';
 
 const app = express();
 
 // Middleware
 app.use(helmet());
 app.use(cors({ origin: config.cors.origins, credentials: true }));
+
+// Inbound provider webhooks must be mounted BEFORE the JSON body parser so the
+// raw request body is available for signature verification.
+app.use('/webhooks', inboundWebhookRoutes);
+
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('short'));
 app.use(requestLogger);
@@ -37,8 +47,8 @@ app.get('/actuator/prometheus', (_req, res) => {
 });
 
 // API routes
-app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/payment-intents', paymentIntentRoutes);
+app.use('/api/v1/auth', ipRateLimit('auth', 20, 60_000), authRoutes);
+app.use('/api/v1/payment-intents', apiKeyRateLimit(120, 60_000), paymentIntentRoutes);
 app.use('/api/v1/merchants', merchantRoutes);
 app.use('/api/v1/me', meRoutes);
 app.use('/api/v1', retryRoutes);
@@ -47,7 +57,7 @@ app.use('/api/v1', reconciliationRoutes);
 app.use('/api/v1', threedsRoutes);
 
 // Public routes
-app.use('/pub', publicRoutes);
+app.use('/pub', ipRateLimit('pub', 60, 60_000), publicRoutes);
 
 // 404 handler
 app.use((_req, res) => {
@@ -70,6 +80,19 @@ app.listen(config.port, () => {
 
   // Start scheduler for retry execution and health monitoring
   schedulerService.start(60000); // Run every minute
+
+  // Fail fast on an invalid key; warn (but keep running) when it is unset.
+  assertEncryptionKey();
+
+  // Start the background webhook delivery engine (outbox -> endpoints).
+  if (process.env.WEBHOOK_WORKER_ENABLED !== 'false') {
+    webhookWorker.start();
+  }
+
+  // Start the daily payout reconciliation worker.
+  if (process.env.PAYOUT_WORKER_ENABLED !== 'false') {
+    payoutWorker.start();
+  }
 });
 
 // Graceful shutdown

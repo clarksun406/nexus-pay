@@ -1,8 +1,18 @@
 import db from '../db/connection';
-import { encrypt, decrypt } from '../utils/crypto';
+import { encrypt, decrypt, isEncryptionConfigured } from '../utils/crypto';
+
+function ensureEncryptionReady() {
+  if (!isEncryptionConfigured()) {
+    throw Object.assign(
+      new Error('Server encryption is not configured (ENCRYPTION_KEY missing); cannot securely store provider credentials.'),
+      { status: 503 },
+    );
+  }
+}
 
 export class ConnectorService {
   async create(merchantId: string, body: any) {
+    ensureEncryptionReady();
     const encryptedCreds = encrypt(JSON.stringify(body.credentials || {}));
 
     const [account] = await db('provider_accounts').insert({
@@ -54,6 +64,7 @@ export class ConnectorService {
     if (body.config) updates.provider_config = JSON.stringify(body.config);
     if (body.feeConfig) updates.fee_config = JSON.stringify(body.feeConfig);
     if (body.credentials) {
+      ensureEncryptionReady();
       updates.encrypted_credentials = encrypt(JSON.stringify(body.credentials));
     }
 

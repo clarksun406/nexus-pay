@@ -5,6 +5,7 @@ import { providerDispatcher } from './provider-dispatcher';
 import { retryService } from './retry.service';
 import { healthMonitorService } from './health-monitor.service';
 import { declineCodeService } from './decline-code.service';
+import { computeFeeForConnector } from './fee-calculator';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -43,9 +44,32 @@ export class PaymentIntentService {
     return this.toResponse(intent);
   }
 
-  async list(merchantId: string, mode?: string, page = 0, size = 20) {
+  async list(merchantId: string, mode?: string, page = 0, size = 20, filters: {
+    status?: string;
+    orderId?: string;
+    minAmount?: number;
+    maxAmount?: number;
+    createdFrom?: Date;
+    createdTo?: Date;
+    search?: string; // substring match on id / order_id / description
+  } = {}) {
     let query = db('payment_intents').where({ merchant_id: merchantId });
     if (mode) query = query.where({ mode });
+    if (filters.status) query = query.where({ status: filters.status.toUpperCase() });
+    if (filters.orderId) query = query.where({ order_id: filters.orderId });
+    if (filters.minAmount != null) query = query.where('amount', '>=', filters.minAmount);
+    if (filters.maxAmount != null) query = query.where('amount', '<=', filters.maxAmount);
+    if (filters.createdFrom) query = query.where('created_at', '>=', filters.createdFrom);
+    if (filters.createdTo) query = query.where('created_at', '<=', filters.createdTo);
+    if (filters.search) {
+      const term = `%${filters.search}%`;
+      query = query.where((qb) => {
+        qb.whereRaw('CAST(id AS TEXT) ILIKE ?', [term])
+          .orWhere('order_id', 'ilike', term)
+          .orWhere('description', 'ilike', term)
+          .orWhere('provider_payment_id', 'ilike', term);
+      });
+    }
 
     const [{ count }] = await query.clone().count();
     const content = await query
@@ -133,6 +157,48 @@ export class PaymentIntentService {
         captureMethod: intent.capture_method,
       }, providerAccountId);
 
+      // Customer authentication required (e.g. 3DS): stop here and surface the action URL.
+      if (result.requiresAction) {
+        await db('payment_requests').where({ id: attempt.id }).update({
+          status: 'PENDING',
+          provider_request_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+
+        const [updated] = await db('payment_intents').where({ id: intentId }).update({
+          status: 'REQUIRES_ACTION',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+          three_ds_action_url: result.actionUrl || null,
+        }).returning('*');
+
+        await db('outbox_events').insert({
+          merchant_id: merchantId,
+          event_type: 'payment_intent.requires_action',
+          resource_id: intentId,
+          payload: JSON.stringify(this.toResponse(updated)),
+        });
+
+        return this.toResponse(updated);
+      }
+
+      // Async processing: leave as PROCESSING; the final state arrives via webhook.
+      if (result.pending) {
+        await db('payment_requests').where({ id: attempt.id }).update({
+          status: 'PENDING',
+          provider_request_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+
+        const [updated] = await db('payment_intents').where({ id: intentId }).update({
+          status: 'PROCESSING',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        }).returning('*');
+
+        return this.toResponse(updated);
+      }
+
       // Update attempt
       await db('payment_requests').where({ id: attempt.id }).update({
         status: result.success ? 'SUCCEEDED' : 'FAILED',
@@ -148,10 +214,20 @@ export class PaymentIntentService {
         ? (manualCapture ? 'REQUIRES_CAPTURE' : 'SUCCEEDED')
         : 'FAILED';
 
+      // Record connector fee + net for SUCCEEDED (auto-capture) charges so
+      // payouts can aggregate them later. For manual-capture this is deferred
+      // to capture(); it'll be recomputed there.
+      let feeUpdate: any = {};
+      if (result.success && !manualCapture) {
+        const fee = await computeFeeForConnector(intent.amount, providerAccountId);
+        feeUpdate = { fee_amount: fee, net_amount: intent.amount - fee };
+      }
+
       const [updated] = await db('payment_intents').where({ id: intentId }).update({
         status: finalStatus,
         provider_payment_id: result.providerPaymentId,
         provider_response: result.providerResponseJson,
+        ...feeUpdate,
       }).returning('*');
 
       // Write outbox event
@@ -239,8 +315,16 @@ export class PaymentIntentService {
       intent.connector_account_id,
     );
 
+    // On capture success, record fee + net for payout reconciliation.
+    let feeUpdate: any = {};
+    if (captured) {
+      const fee = await computeFeeForConnector(intent.amount, intent.connector_account_id);
+      feeUpdate = { fee_amount: fee, net_amount: intent.amount - fee };
+    }
+
     const [updated] = await db('payment_intents').where({ id: intentId }).update({
       status: captured ? 'SUCCEEDED' : 'FAILED',
+      ...feeUpdate,
     }).returning('*');
 
     await db('outbox_events').insert({
@@ -278,7 +362,7 @@ export class PaymentIntentService {
     return this.toResponse(updated);
   }
 
-  private toResponse(intent: any) {
+  toResponse(intent: any) {
     return {
       id: intent.id,
       merchantId: intent.merchant_id,

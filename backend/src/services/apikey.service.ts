@@ -12,7 +12,6 @@ export class ApiKeyService {
       mode,
       type: 'SECRET',
       key_hash: secret.hash,
-      plaintext_key: secret.raw,
       prefix: secret.raw.slice(0, 10),
       name: name ? `${name} (Secret)` : 'Secret Key',
       status: 'ACTIVE',
@@ -23,7 +22,6 @@ export class ApiKeyService {
       mode,
       type: 'PUBLISHABLE',
       key_hash: publishable.hash,
-      plaintext_key: publishable.raw,
       prefix: publishable.raw.slice(0, 10),
       name: name ? `${name} (Publishable)` : 'Publishable Key',
       status: 'ACTIVE',
@@ -50,7 +48,6 @@ export class ApiKeyService {
       status: k.status,
       lastUsedAt: k.last_used_at,
       createdAt: k.created_at,
-      plaintextKey: k.plaintext_key,
     }));
   }
 
@@ -61,8 +58,56 @@ export class ApiKeyService {
     await db('api_keys').where({ id: keyId }).update({
       status: 'REVOKED',
       revoked_at: new Date(),
-      plaintext_key: null,
     });
+  }
+
+  /**
+   * Atomically issue a new key in the same mode/type and revoke the old one.
+   * Returns the freshly-minted raw key (shown to the merchant exactly once)
+   * along with its metadata. The old key continues to work until the
+   * transaction commits, then immediately stops.
+   */
+  async rotate(merchantId: string, keyId: string) {
+    const existing = await db('api_keys').where({ id: keyId, merchant_id: merchantId }).first();
+    if (!existing) throw Object.assign(new Error('API key not found'), { status: 404 });
+    if (existing.status === 'REVOKED') {
+      throw Object.assign(new Error('Cannot rotate a revoked key'), { status: 400 });
+    }
+
+    const prefix = existing.type === 'SECRET' ? 'sk' : 'pk';
+    const fresh = generateApiKey(prefix);
+
+    const trx = await db.transaction();
+    try {
+      const [newRow] = await trx('api_keys').insert({
+        merchant_id: merchantId,
+        mode: existing.mode,
+        type: existing.type,
+        key_hash: fresh.hash,
+        prefix: fresh.raw.slice(0, 10),
+        name: existing.name,
+        status: 'ACTIVE',
+      }).returning('*');
+
+      await trx('api_keys').where({ id: existing.id }).update({
+        status: 'REVOKED',
+        revoked_at: new Date(),
+      });
+
+      await trx.commit();
+
+      return {
+        id: newRow.id,
+        key: fresh.raw,
+        name: newRow.name,
+        mode: newRow.mode,
+        type: newRow.type,
+        rotatedFromId: existing.id,
+      };
+    } catch (err) {
+      await trx.rollback();
+      throw err;
+    }
   }
 }
 
