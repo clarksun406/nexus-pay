@@ -1,8 +1,9 @@
-import { v4 as uuidv4 } from 'uuid';
 import db from '../db/connection';
 import { declineCodeService, DeclineCategory, RetryConfig } from './decline-code.service';
 import { providerDispatcher } from './provider-dispatcher';
 import { routingEngine } from './routing-engine';
+import { binRoutingService } from './bin-routing.service';
+import { threeDsService } from './threeds.service';
 
 export interface RetrySchedule {
   paymentIntentId: string;
@@ -114,64 +115,191 @@ class RetryService {
     merchantId: string,
     attemptNumber: number,
     provider: string,
-    declineCode: string
+    declineCode: string,
+    cardBin?: string
   ): Promise<RetryStrategy> {
     const config = await this.getRetryConfig(merchantId);
     const category = await declineCodeService.getCategory(provider, declineCode);
     const recommendedDelay = await declineCodeService.getRecommendedDelay(provider, declineCode);
 
-    // Smart strategy based on decline category
     let delayMinutes: number;
     let useAlternativeProvider = false;
     let strategyType: RetryStrategy['type'] = 'EXPONENTIAL';
     let immediate = false;
 
-    switch (category) {
-      case 'INSUFFICIENT_FUNDS':
-        // Wait longer for user to add funds
-        delayMinutes = Math.min(recommendedDelay * Math.pow(2, attemptNumber), 1440);
-        strategyType = 'SMART';
-        break;
-
-      case 'NETWORK_ERROR':
-        // Immediate retry for transient network issues
-        delayMinutes = 0;
-        immediate = true;
-        strategyType = 'FIXED';
-        break;
-
-      case 'LIMIT_EXCEEDED':
-        // Wait until next day
-        delayMinutes = 1440;
-        strategyType = 'FIXED';
-        break;
-
-      case 'REQUIRES_AUTH':
-        // Try alternative provider
-        delayMinutes = config.initialDelayMinutes;
+    // 1) BIN-based routing: prefer best historical provider for this card
+    let binPreferredProvider: string | null = null;
+    if (cardBin && cardBin.length >= 6) {
+      const available = await routingEngine.availableProviders(merchantId, 'LIVE');
+      binPreferredProvider = await binRoutingService.resolveBestProvider(cardBin, available);
+      if (binPreferredProvider && binPreferredProvider.toUpperCase() !== provider.toUpperCase()) {
         useAlternativeProvider = true;
         strategyType = 'SMART';
-        break;
-
-      default:
-        // Exponential backoff
-        delayMinutes = Math.min(
-          config.initialDelayMinutes * Math.pow(config.backoffMultiplier, attemptNumber),
-          config.maxDelayMinutes
-        );
-        strategyType = 'EXPONENTIAL';
+      }
     }
 
-    // Apply recommended delay as minimum (skip for immediate)
+    // 2) 3DS upgrade retry: for soft declines, escalate with 3DS before other strategies
+    if (
+      !useAlternativeProvider &&
+      attemptNumber === 1 &&
+      this.isThreeDsUpgradeEligible(category, declineCode)
+    ) {
+      delayMinutes = 0;
+      immediate = true;
+      strategyType = 'SMART';
+    } else {
+      switch (category) {
+        case 'INSUFFICIENT_FUNDS':
+          delayMinutes = Math.min(recommendedDelay * Math.pow(2, attemptNumber), 1440);
+          strategyType = 'SMART';
+          break;
+
+        case 'NETWORK_ERROR':
+          delayMinutes = 0;
+          immediate = true;
+          strategyType = 'FIXED';
+          break;
+
+        case 'LIMIT_EXCEEDED':
+          delayMinutes = 1440;
+          strategyType = 'FIXED';
+          break;
+
+        case 'REQUIRES_AUTH':
+          delayMinutes = config.initialDelayMinutes;
+          useAlternativeProvider = true;
+          strategyType = 'SMART';
+          break;
+
+        default:
+          delayMinutes = Math.min(
+            config.initialDelayMinutes * Math.pow(config.backoffMultiplier, attemptNumber),
+            config.maxDelayMinutes
+          );
+          strategyType = 'EXPONENTIAL';
+      }
+    }
+
     if (!immediate) {
       delayMinutes = Math.max(delayMinutes, recommendedDelay);
     }
+
+    const reason = binPreferredProvider
+      ? `${category}: ${declineCode} (BIN routed to ${binPreferredProvider})`
+      : `${category}: ${declineCode}`;
 
     return {
       type: strategyType,
       delayMinutes,
       useAlternativeProvider,
-      reason: `${category}: ${declineCode}`,
+      reason,
+    };
+  }
+
+  /**
+   * Soft-decline categories eligible for 3DS-upgrade retry
+   */
+  private isThreeDsUpgradeEligible(category: DeclineCategory, declineCode: string): boolean {
+    const softDeclineCategories: DeclineCategory[] = ['REQUIRES_AUTH', 'GENERIC'];
+    if (!softDeclineCategories.includes(category)) return false;
+    const nonUpgradeable = ['lost_card', 'stolen_card', 'expired_card', 'incorrect_cvc'];
+    return !nonUpgradeable.includes(declineCode.toLowerCase());
+  }
+
+  /**
+   * Attempt a 3DS-upgrade retry: re-charge the same PM after initiating a 3DS session.
+   * Returns success + new session id when authentication completes (frictionless or challenge).
+   */
+  async attemptThreeDsUpgrade(
+    paymentIntentId: string,
+    originalRequestId: string,
+    declineCode: string,
+    declineMessage: string,
+    provider: string,
+    connectorAccountId: string,
+    cardBin?: string
+  ): Promise<{ success: boolean; message: string; sessionId?: string }> {
+    const intent = await db('payment_intents').where({ id: paymentIntentId }).first();
+    if (!intent) {
+      return { success: false, message: 'Payment intent not found' };
+    }
+
+    const originalRequest = await db('payment_requests').where({ id: originalRequestId }).first();
+    if (!originalRequest) {
+      return { success: false, message: 'Original request not found' };
+    }
+
+    // Respect cap on 3DS upgrade attempts (max 1 upgrade per intent)
+    const upgradeCount = intent.three_ds_upgrade_count || 0;
+    if (upgradeCount >= 1) {
+      return { success: false, message: '3DS upgrade already attempted' };
+    }
+
+    // Create a 3DS session (2.x frictionless preferred; ACS decides flow)
+    const session = await threeDsService.createSession(paymentIntentId, '2.0');
+
+    // Record the upgrade attempt
+    const [attempt] = await db('retry_attempts')
+      .insert({
+        payment_intent_id: paymentIntentId,
+        original_request_id: originalRequestId,
+        attempt_number: upgradeCount + 1,
+        connector_account_id: connectorAccountId,
+        original_decline_code: declineCode,
+        original_decline_message: declineMessage,
+        decline_category: 'REQUIRES_AUTH',
+        status: 'IN_PROGRESS',
+        scheduled_at: new Date(),
+        retry_strategy: JSON.stringify({ type: 'SMART', delayMinutes: 0, threeDsUpgrade: true }),
+        three_ds_upgrade_attempted: true,
+        card_bin: cardBin || null,
+      })
+      .returning('*');
+
+    await db('payment_intents').where({ id: paymentIntentId }).update({
+      three_ds_upgrade_count: upgradeCount + 1,
+    });
+
+    // If frictionless authentication completed synchronously, charge now
+    if (session.status === 'AUTHENTICATED') {
+      const authData = await threeDsService.getAuthenticationData(session.id);
+      const result = await providerDispatcher.charge(
+        provider,
+        {
+          intentId: paymentIntentId,
+          amount: intent.amount,
+          currency: intent.currency,
+          paymentMethodType: intent.payment_method_type,
+          paymentMethodId: originalRequest.provider_request_id,
+          idempotencyKey: `retry-3ds-${attempt.id}`,
+          captureMethod: intent.capture_method,
+        },
+        connectorAccountId
+      );
+
+      await db('retry_attempts').where({ id: attempt.id }).update({
+        status: result.success ? 'SUCCEEDED' : 'FAILED',
+        attempted_at: new Date(),
+        failure_code: result.failureCode,
+        failure_message: result.failureMessage,
+      });
+
+      if (result.success) {
+        await db('payment_intents').where({ id: paymentIntentId }).update({
+          status: intent.capture_method === 'MANUAL' ? 'REQUIRES_CAPTURE' : 'SUCCEEDED',
+          provider_payment_id: result.providerPaymentId,
+          provider_response: result.providerResponseJson,
+        });
+        return { success: true, message: '3DS upgrade succeeded (frictionless)', sessionId: session.id };
+      }
+      return { success: false, message: '3DS upgrade charge failed', sessionId: session.id };
+    }
+
+    // Otherwise ACS requires challenge — caller must complete it, then charge
+    return {
+      success: false,
+      message: `3DS challenge required (${session.status})`,
+      sessionId: session.id,
     };
   }
 
@@ -273,8 +401,6 @@ class RetryService {
       return { success: false, message: err.message };
     }
   }
-    };
-  }
 
   /**
    * Schedule a retry attempt
@@ -285,7 +411,8 @@ class RetryService {
     declineCode: string,
     declineMessage: string,
     provider: string,
-    connectorAccountId: string
+    connectorAccountId: string,
+    cardBin?: string
   ): Promise<RetryResult> {
     const intent = await db('payment_intents').where({ id: paymentIntentId }).first();
     if (!intent) {
@@ -314,12 +441,13 @@ class RetryService {
       return { success: false, attemptId: '', message: 'Maximum retry attempts exceeded' };
     }
 
-    // Calculate strategy
+    // Calculate strategy (with BIN awareness)
     const strategy = await this.calculateRetryStrategy(
       intent.merchant_id,
       attemptNumber,
       provider,
-      declineCode
+      declineCode,
+      cardBin
     );
 
     // Calculate scheduled time
@@ -335,6 +463,13 @@ class RetryService {
     // Get category
     const category = await declineCodeService.getCategory(provider, declineCode);
 
+    // Resolve BIN-preferred provider override if any
+    let binRoutingProvider: string | null = null;
+    if (cardBin && cardBin.length >= 6) {
+      const available = await routingEngine.availableProviders(intent.merchant_id, intent.mode || 'LIVE');
+      binRoutingProvider = await binRoutingService.resolveBestProvider(cardBin, available);
+    }
+
     // Create retry attempt
     const [attempt] = await db('retry_attempts')
       .insert({
@@ -348,6 +483,8 @@ class RetryService {
         status: 'SCHEDULED',
         scheduled_at: scheduledAt,
         retry_strategy: JSON.stringify(strategy),
+        card_bin: cardBin || null,
+        bin_routing_provider: binRoutingProvider,
       })
       .returning('*');
 

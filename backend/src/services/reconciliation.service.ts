@@ -47,6 +47,21 @@ export interface ProviderTransaction {
   reconciliationStatus: 'PENDING' | 'MATCHED' | 'UNMATCHED' | 'DISPUTED';
 }
 
+export interface SettlementRecord {
+  id: string;
+  merchantId: string;
+  settlementReference?: string;
+  settlementAmount: number;
+  settlementCurrency: string;
+  feeAmount?: number;
+  netAmount?: number;
+  valueDate: Date;
+  matchedTransactionsCount: number;
+  discrepancyAmount: number;
+  status: 'PENDING' | 'MATCHED' | 'UNMATCHED';
+  rawData?: string;
+}
+
 class ReconciliationService {
   /**
    * Create reconciliation source
@@ -130,10 +145,132 @@ class ReconciliationService {
   }
 
   /**
+   * Import a bank settlement file. Creates a settlement record and auto-matches
+   * against provider_transactions / payment_intents for the same value date.
+   */
+  async importBankSettlement(
+    merchantId: string,
+    payload: {
+      settlementReference?: string;
+      settlementAmount: number;
+      settlementCurrency: string;
+      feeAmount?: number;
+      netAmount?: number;
+      valueDate: Date;
+      transactions?: Array<{
+        providerTransactionId: string;
+        amount: number;
+        currency: string;
+        status?: string;
+        transactionTime?: Date;
+      }>;
+      rawData?: any;
+    }
+  ): Promise<SettlementRecord> {
+    const sourceId = await this.ensureBankSource(merchantId);
+
+    const [record] = await db('settlement_records')
+      .insert({
+        merchant_id: merchantId,
+        source_id: sourceId,
+        settlement_reference: payload.settlementReference,
+        settlement_amount: payload.settlementAmount,
+        settlement_currency: payload.settlementCurrency,
+        fee_amount: payload.feeAmount,
+        net_amount: payload.netAmount,
+        value_date: payload.valueDate,
+        raw_data: payload.rawData ? JSON.stringify(payload.rawData) : null,
+        status: 'PENDING',
+      })
+      .returning('*');
+
+    if (payload.transactions && payload.transactions.length > 0) {
+      await this.importTransactions(
+        sourceId,
+        payload.transactions.map((t) => ({
+          providerTransactionId: t.providerTransactionId,
+          amount: t.amount,
+          currency: t.currency,
+          status: t.status || 'settled',
+          transactionTime: t.transactionTime || payload.valueDate,
+          transactionType: 'PAYMENT',
+        }))
+      );
+    }
+
+    const valueDayStart = new Date(payload.valueDate);
+    valueDayStart.setHours(0, 0, 0, 0);
+    const valueDayEnd = new Date(payload.valueDate);
+    valueDayEnd.setHours(23, 59, 59, 999);
+
+    const matchedTxs = await db('provider_transactions')
+      .where({ merchant_id: merchantId })
+      .whereBetween('transaction_time', [valueDayStart, valueDayEnd]);
+
+    const matchedSum = matchedTxs.reduce((s: number, t: any) => s + (t.amount || 0), 0);
+    const discrepancy = Math.abs(payload.settlementAmount - matchedSum);
+
+    const finalStatus = discrepancy === 0 ? 'MATCHED' : 'UNMATCHED';
+
+    await db('settlement_records').where({ id: record.id }).update({
+      matched_transactions_count: matchedTxs.length,
+      discrepancy_amount: discrepancy,
+      status: finalStatus,
+    });
+
+    return {
+      id: record.id,
+      merchantId: record.merchant_id,
+      settlementReference: record.settlement_reference,
+      settlementAmount: record.settlement_amount,
+      settlementCurrency: record.settlement_currency,
+      feeAmount: record.fee_amount,
+      netAmount: record.net_amount,
+      valueDate: record.value_date,
+      matchedTransactionsCount: matchedTxs.length,
+      discrepancyAmount: discrepancy,
+      status: finalStatus,
+      rawData: record.raw_data,
+    };
+  }
+
+  /**
+   * List bank settlements for a merchant within a date range.
+   */
+  async listSettlements(merchantId: string, from: Date, to: Date): Promise<SettlementRecord[]> {
+    const rows = await db('settlement_records')
+      .where({ merchant_id: merchantId })
+      .whereBetween('value_date', [from, to])
+      .orderBy('value_date', 'desc');
+
+    return rows.map((r: any) => ({
+      id: r.id,
+      merchantId: r.merchant_id,
+      settlementReference: r.settlement_reference,
+      settlementAmount: r.settlement_amount,
+      settlementCurrency: r.settlement_currency,
+      feeAmount: r.fee_amount,
+      netAmount: r.net_amount,
+      valueDate: r.value_date,
+      matchedTransactionsCount: r.matched_transactions_count,
+      discrepancyAmount: r.discrepancy_amount,
+      status: r.status,
+      rawData: r.raw_data,
+    }));
+  }
+
+  private async ensureBankSource(merchantId: string): Promise<string> {
+    const existing = await db('reconciliation_sources')
+      .where({ merchant_id: merchantId, source_type: 'BANK' })
+      .first();
+    if (existing) return existing.id;
+    return this.createSource(merchantId, 'BANK', 'Default Bank Settlement');
+  }
+
+  /**
    * Run reconciliation for a specific date
    */
   async runReconciliation(merchantId: string, reportDate: Date): Promise<ReconciliationReport> {
-    // Create or get report
     let report = await db('reconciliation_reports')
       .where({ merchant_id: merchantId, report_date: reportDate })
       .first();
@@ -151,19 +288,16 @@ class ReconciliationService {
       return report;
     }
 
-    // Get all transactions for the date
     const startOfDay = new Date(reportDate);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(reportDate);
     endOfDay.setHours(23, 59, 59, 999);
 
-    // Internal transactions
     const internalPayments = await db('payment_intents')
       .where({ merchant_id: merchantId })
       .whereBetween('created_at', [startOfDay, endOfDay])
       .whereNotNull('provider_payment_id');
 
-    // External transactions from providers
     const externalTransactions = await db('provider_transactions')
       .where({ merchant_id: merchantId })
       .whereBetween('transaction_time', [startOfDay, endOfDay]);
@@ -175,11 +309,9 @@ class ReconciliationService {
     let matchedAmount = 0;
     let discrepancyAmount = 0;
 
-    // Match transactions
     for (const extTx of externalTransactions) {
       totalAmount += extTx.amount;
 
-      // Try to match by provider payment ID
       const internalMatch = internalPayments.find(
         (ip) =>
           ip.provider_payment_id === extTx.provider_transaction_id ||
@@ -187,9 +319,7 @@ class ReconciliationService {
       );
 
       if (internalMatch) {
-        // Check for amount mismatch
         if (internalMatch.amount !== extTx.amount) {
-          // Create discrepancy
           await this.createDiscrepancy({
             reportId: report.id,
             paymentIntentId: internalMatch.id,
@@ -213,7 +343,6 @@ class ReconciliationService {
           });
         }
       } else {
-        // No internal match
         await this.createDiscrepancy({
           reportId: report.id,
           providerTransactionId: extTx.id,
@@ -229,7 +358,6 @@ class ReconciliationService {
       }
     }
 
-    // Check for missing external transactions
     for (const intTx of internalPayments) {
       const externalMatch = externalTransactions.find(
         (et) =>
@@ -250,7 +378,6 @@ class ReconciliationService {
       }
     }
 
-    // Update report
     const [updated] = await db('reconciliation_reports')
       .where({ id: report.id })
       .update({
@@ -269,8 +396,68 @@ class ReconciliationService {
   }
 
   /**
-   * Create a discrepancy record
+   * Historical backfill: run reconciliation for every day in [fromDate, toDate].
+   * Caps at 366 days to bound work; supports forceRerun to rebuild completed reports.
    */
+  async runHistoricalReconciliation(
+    merchantId: string,
+    fromDate: Date,
+    toDate: Date,
+    options: { forceRerun?: boolean } = {}
+  ): Promise<{
+    reportsGenerated: number;
+    reportsSkipped: number;
+    reportsFailed: number;
+    reports: ReconciliationReport[];
+  }> {
+    if (fromDate > toDate) {
+      throw new Error('fromDate must be before or equal toDate');
+    }
+    const spanMs = toDate.getTime() - fromDate.getTime();
+    if (spanMs > 366 * 24 * 60 * 60 * 1000) {
+      throw new Error('Historical backfill range cannot exceed 366 days');
+    }
+
+    const reports: ReconciliationReport[] = [];
+    let reportsGenerated = 0;
+    let reportsSkipped = 0;
+    let reportsFailed = 0;
+
+    const cursor = new Date(fromDate);
+    cursor.setHours(0, 0, 0, 0);
+    const end = new Date(toDate);
+    end.setHours(0, 0, 0, 0);
+
+    while (cursor <= end) {
+      const day = new Date(cursor);
+      try {
+        const existing = await db('reconciliation_reports')
+          .where({ merchant_id: merchantId, report_date: day })
+          .first();
+
+        if (existing && existing.status === 'COMPLETED' && !options.forceRerun) {
+          reportsSkipped++;
+          reports.push(existing);
+        } else if (existing && options.forceRerun) {
+          await db('reconciliation_discrepancies').where({ report_id: existing.id }).del();
+          await db('reconciliation_reports').where({ id: existing.id }).del();
+          const r = await this.runReconciliation(merchantId, day);
+          reports.push(r);
+          reportsGenerated++;
+        } else {
+          const r = await this.runReconciliation(merchantId, day);
+          reports.push(r);
+          reportsGenerated++;
+        }
+      } catch (err) {
+        reportsFailed++;
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    return { reportsGenerated, reportsSkipped, reportsFailed, reports };
+  }
+
   private async createDiscrepancy(data: {
     reportId: string;
     paymentIntentId?: string;
@@ -385,17 +572,19 @@ class ReconciliationService {
     discrepancyAmount: number;
     matchRate: number;
   }> {
-    const reports = await this.getReports(merchantId, from, to);
+    const rawReports = await db('reconciliation_reports')
+      .where({ merchant_id: merchantId })
+      .whereBetween('report_date', [from, to]);
 
     const summary = {
-      totalReports: reports.length,
-      totalTransactions: reports.reduce((sum, r) => sum + r.total_transactions, 0),
-      matchedTransactions: reports.reduce((sum, r) => sum + r.matched_transactions, 0),
-      unmatchedTransactions: reports.reduce((sum, r) => sum + r.unmatched_transactions, 0),
-      disputedTransactions: reports.reduce((sum, r) => sum + r.disputed_transactions, 0),
-      totalAmount: reports.reduce((sum, r) => sum + (r.total_amount || 0), 0),
-      matchedAmount: reports.reduce((sum, r) => sum + (r.matched_amount || 0), 0),
-      discrepancyAmount: reports.reduce((sum, r) => sum + (r.discrepancy_amount || 0), 0),
+      totalReports: rawReports.length,
+      totalTransactions: rawReports.reduce((sum: number, r: any) => sum + (r.total_transactions || 0), 0),
+      matchedTransactions: rawReports.reduce((sum: number, r: any) => sum + (r.matched_transactions || 0), 0),
+      unmatchedTransactions: rawReports.reduce((sum: number, r: any) => sum + (r.unmatched_transactions || 0), 0),
+      disputedTransactions: rawReports.reduce((sum: number, r: any) => sum + (r.disputed_transactions || 0), 0),
+      totalAmount: rawReports.reduce((sum: number, r: any) => sum + (r.total_amount || 0), 0),
+      matchedAmount: rawReports.reduce((sum: number, r: any) => sum + (r.matched_amount || 0), 0),
+      discrepancyAmount: rawReports.reduce((sum: number, r: any) => sum + (r.discrepancy_amount || 0), 0),
       matchRate: 0,
     };
 

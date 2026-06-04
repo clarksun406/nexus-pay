@@ -4,7 +4,7 @@ import { authenticateJwt, requireSecretKey } from '../middleware/auth';
 
 const router = Router();
 
-// Create 3DS session (API key required)
+// Create 3DS session (API key required) — supports version "1.0" (redirect) or "2.x"
 router.post('/payment-intents/:intentId/3ds/session', requireSecretKey, async (req: Request, res: Response) => {
   try {
     const session = await threeDsService.createSession(req.params.intentId, req.body.version);
@@ -87,6 +87,16 @@ router.post('/3ds/challenges/:challengeId/submit', authenticateJwt, async (req: 
   }
 });
 
+// 3DS 1.0: submit PaRes from issuer ACS
+router.post('/3ds/sessions/:sessionId/pares', requireSecretKey, async (req: Request, res: Response) => {
+  try {
+    const session = await threeDsService.submitPaRes(req.params.sessionId, req.body.pares, req.body.md);
+    res.json(session);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Complete authentication
 router.post('/3ds/sessions/:sessionId/complete', requireSecretKey, async (req: Request, res: Response) => {
   try {
@@ -116,6 +126,16 @@ router.post('/3ds/check-required', requireSecretKey, async (req: Request, res: R
       req.body.country
     );
     res.json({ required });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get liability shift records for a payment intent
+router.get('/payment-intents/:intentId/3ds/liability-shifts', authenticateJwt, async (req: Request, res: Response) => {
+  try {
+    const records = await threeDsService.getLiabilityShifts(req.params.intentId);
+    res.json(records);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

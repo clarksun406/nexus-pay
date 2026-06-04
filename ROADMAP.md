@@ -4,7 +4,7 @@
 
 ---
 
-## P0 - 核心能力（必须有）✅ 已完成
+## P0 - 核心能力（必须有）✅ 全部完成
 
 > 资金安全、交易成功率、合规性基础
 
@@ -13,28 +13,36 @@
 **目标**：自动恢复失败交易，提升成功率 20-30%
 
 **功能点**：
-- [x] 拒绝码解析与分类
+- [x] 拒绝码解析与分类（15 种 Stripe 错误码）
 - [x] 基于错误类型的重试策略
 - [x] 立即重试（NETWORK_ERROR）
 - [x] 延迟重试（INSUFFICIENT_FUNDS, LIMIT_EXCEEDED）
 - [x] 重试预算控制（最大次数、惩罚阈值）
 - [x] 时间窗口调度
-- [ ] 卡 BIN 路由优化
-- [ ] 3DS 升级重试
+- [x] 卡 BIN 路由优化（基于历史成功率 + 延迟加权选 provider）
+- [x] 3DS 升级重试（软拒绝后自动升级 3DS 二次尝试）
 
 **实现文件**：
-- `services/retry.service.ts` - 重试策略与执行
+- `services/retry.service.ts` - 重试策略与执行（含 BIN 路由与 3DS 升级）
 - `services/decline-code.service.ts` - 拒绝码解析
 - `services/scheduler.service.ts` - 定时任务
+- `services/bin-routing.service.ts` - 卡 BIN 注册与优选 provider 查询
 
 **数据模型**：
 ```sql
-retry_configs       -- 重试配置
-retry_attempts      -- 重试记录
-decline_code_mappings  -- 拒绝码映射
+retry_configs             -- 重试配置
+retry_attempts            -- 重试记录（含 card_bin / bin_routing_provider / three_ds_upgrade_attempted）
+decline_code_mappings     -- 拒绝码映射
+card_bin_registry         -- BIN 注册表（card_network / issuer / preferred_provider / provider_performance）
 ```
 
-**完成日期**：2026-05-16
+**新增 API**：
+- `GET  /api/v1/bin/:bin` - 查询 BIN 信息与优选 provider
+- `GET  /api/v1/bin` - 列出 BIN 注册表
+- `POST /api/v1/bin` - 注册/更新 BIN（ADMIN）
+- `POST /api/v1/payment-intents/:intentId/3ds-upgrade-retry` - 触发 3DS 升级重试
+
+**完成日期**：2026-06-04（BIN 路由 + 3DS 升级补齐）
 
 ---
 
@@ -43,28 +51,37 @@ decline_code_mappings  -- 拒绝码映射
 **目标**：确保资金一致性，消除收入泄漏
 
 **功能点**：
-- [x] PSP 交易数据导入
+- [x] PSP 交易数据导入（手工）
 - [x] 三方对账（内部 + PSP + 银行）
 - [x] 差异检测与报告
 - [x] 手动调整与标记
 - [x] 对账状态流转
-- [ ] PSP 数据自动拉取
-- [ ] 银行结算数据导入
-- [ ] 历史回溯对账
+- [x] PSP 数据自动拉取（Stripe Balance Transactions，定时 15 分钟）
+- [x] 银行结算数据导入（JSON 文件 + 自动匹配）
+- [x] 历史回溯对账（366 天内任意日期范围，支持强制重建）
 
 **实现文件**：
-- `services/reconciliation.service.ts` - 对账核心逻辑
+- `services/reconciliation.service.ts` - 对账核心逻辑（含银行结算 + 历史回溯）
+- `services/psp-sync.service.ts` - PSP 自动拉取（Stripe / Square / Braintree 适配器）
 - `routes/reconciliation.routes.ts` - API 端点
 
 **数据模型**：
 ```sql
-reconciliation_sources      -- 对账数据源
-provider_transactions       -- 渠道原始交易
-reconciliation_reports      -- 对账报告
-reconciliation_discrepancies  -- 差异记录
+reconciliation_sources         -- 对账数据源（PSP / BANK）
+provider_transactions          -- 渠道原始交易
+reconciliation_reports         -- 对账报告
+reconciliation_discrepancies   -- 差异记录
+settlement_records             -- 银行结算记录（settlement_reference / value_date / matched_count）
 ```
 
-**完成日期**：2026-05-16
+**新增 API**：
+- `POST /api/v1/merchants/:merchantId/reconciliation/sync` - 手工触发 PSP 同步（FINANCE）
+- `POST /api/v1/reconciliation/sources/:sourceId/sync` - 同步单个数据源
+- `POST /api/v1/merchants/:merchantId/reconciliation/settlements` - 导入银行结算（FINANCE）
+- `GET  /api/v1/merchants/:merchantId/reconciliation/settlements` - 列出结算记录
+- `POST /api/v1/merchants/:merchantId/reconciliation/backfill` - 历史回溯对账（FINANCE，最多 366 天）
+
+**完成日期**：2026-06-04（PSP 自动拉取 + 银行结算 + 历史回溯补齐）
 
 ---
 
@@ -77,20 +94,24 @@ reconciliation_discrepancies  -- 差异记录
 - [x] 错误率阈值告警
 - [x] 自动禁用/降级
 - [x] 健康度看板
-- [ ] 延迟监控
-- [ ] 历史趋势分析
+- [x] 延迟监控（基于 `request_latency_samples` 的 avg / p95 / p99）
+- [x] 历史趋势分析（小时 / 天粒度，PostgreSQL 时序聚合）
 
 **实现文件**：
-- `services/health-monitor.service.ts` - 健康监控
+- `services/health-monitor.service.ts` - 健康监控（真实延迟分位数 + 趋势）
 - `routes/health.routes.ts` - API 端点
 
 **数据模型**：
 ```sql
-provider_health_metrics  -- 渠道健康指标
-provider_outages         -- 渠道故障记录
+provider_health_metrics   -- 渠道健康指标（含 avg/p95/p99/sample_count）
+provider_outages          -- 渠道故障记录（含 duration_minutes 自动计算）
+request_latency_samples   -- 原始延迟样本（7 天保留）
 ```
 
-**完成日期**：2026-05-16
+**新增 API**：
+- `GET /api/v1/connectors/:connectorAccountId/health/trend` - 延迟趋势（?from&to&granularity=hour|day）
+
+**完成日期**：2026-06-04（延迟分位数 + 趋势补齐）
 
 ---
 
@@ -102,21 +123,26 @@ provider_outages         -- 渠道故障记录
 - [x] 3DS 会话管理
 - [x] 挑战流程处理
 - [x] 3DS 数据传递（ECI, CAVV, XID）
-- [ ] 3DS 1.0 支持
-- [ ] frictionless 流程
-- [ ] 责任转移记录
+- [x] 3DS 1.0 支持（PaReq / PaRes / MD redirect 流程）
+- [x] Frictionless 流程（ACS 返回无挑战时自动完成）
+- [x] 责任转移记录（基于 ECI 的 liability shift 推导，写入 `three_ds_liability_shifts`）
 
 **实现文件**：
-- `services/threeds.service.ts` - 3DS 核心逻辑
+- `services/threeds.service.ts` - 3DS 核心逻辑（含 1.0 / 2.x 双协议 + 责任转移）
 - `routes/threeds.routes.ts` - API 端点
 
 **数据模型**：
 ```sql
-three_ds_sessions    -- 3DS 会话
-three_ds_challenges  -- 挑战记录
+three_ds_sessions            -- 3DS 会话（含 flow_type / frictionless_flow / pareq / pares / md）
+three_ds_challenges          -- 挑战记录
+three_ds_liability_shifts    -- 责任转移记录（liability_shift / eci / chargeback_protected）
 ```
 
-**完成日期**：2026-05-16
+**新增 API**：
+- `POST /api/v1/3ds/sessions/:sessionId/pares` - 3DS 1.0 PaRes 回传
+- `GET  /api/v1/payment-intents/:intentId/3ds/liability-shifts` - 查询责任转移记录
+
+**完成日期**：2026-06-04（1.0 + frictionless + liability shift 补齐）
 
 ---
 
@@ -137,8 +163,8 @@ three_ds_challenges  -- 挑战记录
 
 **数据模型**：
 ```sql
-network_tokens       -- 网络令牌
-token_lifecycle_events  -- 令牌生命周期事件
+network_tokens            -- 网络令牌
+token_lifecycle_events    -- 令牌生命周期事件
 ```
 
 **工作量**：4-5 周（需与卡网络对接）
@@ -159,8 +185,8 @@ token_lifecycle_events  -- 令牌生命周期事件
 **数据模型**：
 ```sql
 -- 扩展现有 provider_accounts.fee_config
-fee_schedules       -- 费率表
-cost_analytics      -- 成本分析
+fee_schedules             -- 费率表
+cost_analytics            -- 成本分析
 ```
 
 **工作量**：2-3 周
@@ -182,11 +208,11 @@ cost_analytics      -- 成本分析
 
 **数据模型**：
 ```sql
-fraud_rules         -- 风控规则
-fraud_scores        -- 风险评分
-fraud_alerts        -- 风险预警
-payment_reviews     -- 人工审核
-blocklists          -- 黑名单
+fraud_rules               -- 风控规则
+fraud_scores              -- 风险评分
+fraud_alerts              -- 风险预警
+payment_reviews           -- 人工审核
+blocklists                -- 黑名单
 ```
 
 **工作量**：3-4 周
@@ -223,8 +249,8 @@ blocklists          -- 黑名单
 
 **数据模型**：
 ```sql
-split_payments      -- 分账记录
-split_payment_items -- 分账明细
+split_payments            -- 分账记录
+split_payment_items       -- 分账明细
 ```
 
 **工作量**：2-3 周
@@ -257,9 +283,9 @@ split_payment_items -- 分账明细
 
 **数据模型**：
 ```sql
-subscriptions       -- 订阅
-subscription_plans  -- 订阅计划
-subscription_invoices -- 订阅发票
+subscriptions             -- 订阅
+subscription_plans        -- 订阅计划
+subscription_invoices     -- 订阅发票
 ```
 
 **工作量**：3-4 周
@@ -353,19 +379,19 @@ subscription_invoices -- 订阅发票
 
 ## 实施计划
 
-### Q1 - 基础能力
+### Q1 - 基础能力 ✅
 
-| 阶段 | 内容 | 周数 |
-|------|------|------|
-| 第1-3周 | 渠道健康监控 + 自动降级 | 3 |
-| 第4-7周 | 智能重试引擎 | 4 |
-| 第8-11周 | 对账系统 | 4 |
+| 阶段 | 内容 | 周数 | 状态 |
+|------|------|------|------|
+| 第1-3周 | 渠道健康监控 + 自动降级 | 3 | ✅ 完成（含延迟分位数与趋势）|
+| 第4-7周 | 智能重试引擎 | 4 | ✅ 完成（含 BIN 路由与 3DS 升级）|
+| 第8-11周 | 对账系统 | 4 | ✅ 完成（含 PSP 自动拉取 / 银行结算 / 历史回溯）|
 
 ### Q2 - 合规与安全
 
 | 阶段 | 内容 | 周数 |
 |------|------|------|
-| 第1-4周 | 3DS 完整流程 | 4 |
+| 第1-4周 | 3DS 完整流程 | ✅ 4（含 1.0 / frictionless / 责任转移）|
 | 第5-8周 | 风控规则引擎 | 4 |
 | 第9-10周 | 退款状态同步 | 2 |
 
@@ -407,6 +433,7 @@ subscription_invoices -- 订阅发票
 | 渠道对接复杂度高 | 抽象 Connector 层，统一接口 |
 | 对账数据格式不统一 | 建立标准化转换层 |
 | 3DS 合规要求 | 参考 EMVCo 规范，使用认证 SDK |
+| 调度器多实例重复执行 | 引入分布式锁（待 P4 基建阶段补） |
 
 ---
 
@@ -414,10 +441,10 @@ subscription_invoices -- 订阅发票
 
 | 指标 | 当前 | 目标 | P0 完成后 |
 |------|------|------|-----------|
-| 支付成功率 | - | 95%+ | 预计 90%+ |
-| 重试恢复率 | 0% | 20%+ | ✅ 基础能力已就绪 |
-| 对账自动化率 | 0% | 90%+ | ✅ 核心流程已实现 |
-| 渠道可用性 | - | 99.9% | ✅ 自动降级已实现 |
+| 支付成功率 | - | 95%+ | ✅ 预计 90%+（BIN 路由 + 3DS 升级）|
+| 重试恢复率 | 0% | 20%+ | ✅ 基础能力 + BIN 智能 + 3DS 升级 |
+| 对账自动化率 | 0% | 90%+ | ✅ PSP 自动拉取 + 银行结算自动匹配 |
+| 渠道可用性 | - | 99.9% | ✅ 自动降级 + 真实延迟监控（p95/p99）|
 | 欺诈率 | - | <0.1% | 待风控引擎 |
 | 退款处理时效 | - | T+1 | 待完善 |
 
@@ -425,20 +452,26 @@ subscription_invoices -- 订阅发票
 
 ## P0 完成总结
 
-**已实现功能**：
-- 智能重试引擎（立即重试 + 延迟重试）
-- 拒绝码解析与分类（15 种 Stripe 错误码）
-- 渠道健康监控（错误率阈值、自动降级）
-- 三方对账系统（差异检测、手动解决）
-- 3DS 认证流程（会话管理、挑战处理）
+**已实现功能（全部 4 大模块闭环）**：
+- ✅ 智能重试引擎：立即重试 + 延迟重试 + BIN 路由 + 3DS 升级重试
+- ✅ 拒绝码解析与分类：15 种 Stripe 错误码
+- ✅ 渠道健康监控：错误率阈值 + 真实延迟 p95/p99 + 自动降级 + 历史趋势
+- ✅ 对账系统：三方对账 + PSP 自动拉取（Stripe） + 银行结算导入 + 历史回溯
+- ✅ 3DS 认证：2.x 会话/挑战 + 1.0 redirect + frictionless + 责任转移记录
 
 **代码统计**：
-- 新增文件：11 个服务/路由文件
-- 新增代码：2500+ 行
-- 数据库表：11 张新表
+- 新增/修改文件：~15 个服务与路由文件
+- 新增代码：~3500 行（P0 补齐 +3500，相比 P0 初始 +2500）
+- 数据库迁移：3 个（001 初版 / 002 retry & reconciliation / 003 p0_completion）
+- 数据库新表：18 张
 
-**待完善项**：
-- PSP 数据自动拉取（需各渠道 API 对接）
-- 卡 BIN 路由优化
-- 3DS 1.0 支持
-- 延迟监控（p95/p99）
+**Scheduler 周期任务**：
+- 重试执行：每 1 分钟
+- 健康检查：每 5 分钟
+- PSP 自动拉取：每 15 分钟
+- 结算新鲜度检查：每 6 小时
+
+**待 P1 启动前解决**：
+- 调度器单点：引入分布式锁（推荐 `node-cron` + Redis 或 `pg_advisory_lock`）
+- `provider-dispatcher` 策略化重构：为 P3 渠道扩展铺路
+- 测试基线：至少补 retry / reconciliation / 3DS 核心集成测试

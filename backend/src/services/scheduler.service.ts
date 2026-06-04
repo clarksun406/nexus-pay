@@ -1,10 +1,13 @@
 import { retryService } from '../services/retry.service';
 import { healthMonitorService } from '../services/health-monitor.service';
+import { pspSyncService } from '../services/psp-sync.service';
 import db from '../db/connection';
 
 class SchedulerService {
   private intervalId: NodeJS.Timeout | null = null;
   private healthCheckIntervalId: NodeJS.Timeout | null = null;
+  private pspSyncIntervalId: NodeJS.Timeout | null = null;
+  private settlementCheckIntervalId: NodeJS.Timeout | null = null;
 
   /**
    * Start the scheduler
@@ -12,7 +15,7 @@ class SchedulerService {
   start(intervalMs: number = 60000): void {
     console.log('Starting scheduler...');
 
-    // Retry executor
+    // Retry executor — every minute
     this.intervalId = setInterval(async () => {
       try {
         const result = await retryService.executeRetries();
@@ -24,7 +27,7 @@ class SchedulerService {
       }
     }, intervalMs);
 
-    // Health check
+    // Health check — every 5 minutes
     this.healthCheckIntervalId = setInterval(async () => {
       try {
         const merchants = await db('merchants').where({ status: 'ACTIVE' });
@@ -37,7 +40,44 @@ class SchedulerService {
       } catch (err) {
         console.error('Health check error:', err);
       }
-    }, intervalMs * 5); // Check every 5 minutes
+    }, intervalMs * 5);
+
+    // PSP auto-sync — every 15 minutes
+    this.pspSyncIntervalId = setInterval(async () => {
+      try {
+        const sources = await db('reconciliation_sources')
+          .where({ source_type: 'PSP', status: 'ACTIVE' });
+        const merchantIds = [...new Set(sources.map((s: any) => s.merchant_id))];
+        let totalImported = 0;
+        for (const merchantId of merchantIds) {
+          const results = await pspSyncService.syncAllForMerchant(merchantId);
+          totalImported += results.reduce((s, r) => s + r.imported, 0);
+        }
+        if (totalImported > 0) {
+          console.log(`PSP sync: ${totalImported} transactions imported across ${merchantIds.length} merchants`);
+        }
+      } catch (err) {
+        console.error('PSP sync error:', err);
+      }
+    }, intervalMs * 15);
+
+    // Settlement freshness check — every 6 hours
+    this.settlementCheckIntervalId = setInterval(async () => {
+      try {
+        // Detect settlements that have been PENDING for over 24 hours (stale)
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const stale = await db('settlement_records')
+          .where({ status: 'PENDING' })
+          .where('created_at', '<', cutoff)
+          .count('* as count')
+          .first();
+        if (stale && parseInt(stale.count as string, 10) > 0) {
+          console.log(`Settlement freshness: ${stale.count} stale pending settlements`);
+        }
+      } catch (err) {
+        console.error('Settlement check error:', err);
+      }
+    }, intervalMs * 60 * 6);
 
     console.log('Scheduler started');
   }
@@ -53,6 +93,14 @@ class SchedulerService {
     if (this.healthCheckIntervalId) {
       clearInterval(this.healthCheckIntervalId);
       this.healthCheckIntervalId = null;
+    }
+    if (this.pspSyncIntervalId) {
+      clearInterval(this.pspSyncIntervalId);
+      this.pspSyncIntervalId = null;
+    }
+    if (this.settlementCheckIntervalId) {
+      clearInterval(this.settlementCheckIntervalId);
+      this.settlementCheckIntervalId = null;
     }
     console.log('Scheduler stopped');
   }

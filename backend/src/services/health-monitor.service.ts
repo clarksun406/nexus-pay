@@ -1,5 +1,4 @@
 import db from '../db/connection';
-import { routingEngine } from './routing-engine';
 
 export interface HealthMetrics {
   connectorAccountId: string;
@@ -11,6 +10,7 @@ export interface HealthMetrics {
   failedRequests: number;
   avgLatencyMs: number;
   p95LatencyMs: number;
+  p99LatencyMs: number;
   lastUpdated: Date;
 }
 
@@ -33,6 +33,14 @@ export interface HealthThreshold {
   minSampleSize: number;
 }
 
+export interface LatencyTrend {
+  period: string; // YYYY-MM-DD or YYYY-MM-DD HH:00
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+  p99LatencyMs: number;
+  sampleCount: number;
+}
+
 const DEFAULT_THRESHOLDS: HealthThreshold = {
   errorRateWarning: 5,
   errorRateCritical: 15,
@@ -41,11 +49,20 @@ const DEFAULT_THRESHOLDS: HealthThreshold = {
   minSampleSize: 10,
 };
 
+/**
+ * Calculate the p-th percentile from a sorted array of numbers using nearest-rank.
+ */
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)];
+}
+
 class HealthMonitorService {
   private thresholds: Map<string, HealthThreshold> = new Map();
 
   /**
-   * Record a payment request result
+   * Record a payment request result, including a latency sample for p95/p99.
    */
   async recordRequest(
     connectorAccountId: string,
@@ -54,6 +71,14 @@ class HealthMonitorService {
   ): Promise<void> {
     const now = new Date();
     const metricTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+
+    // Persist latency sample
+    await db('request_latency_samples').insert({
+      connector_account_id: connectorAccountId,
+      latency_ms: latencyMs,
+      success,
+      recorded_at: now,
+    });
 
     // Upsert hourly metrics
     const existing = await db('provider_health_metrics')
@@ -66,12 +91,19 @@ class HealthMonitorService {
       const newFailed = existing.failed_requests + (success ? 0 : 1);
       const successRate = (newSuccess / newTotal) * 100;
 
+      // Compute live p95/p99 from samples within this hour bucket
+      const { avgLatency, p95, p99 } = await this.computeLatencyStats(connectorAccountId, metricTime, now);
+
       await db('provider_health_metrics').where({ id: existing.id }).update({
         total_requests: newTotal,
         successful_requests: newSuccess,
         failed_requests: newFailed,
         success_rate: successRate,
-        health_status: this.calculateHealthStatus(successRate, existing.avg_latency_ms),
+        avg_latency_ms: avgLatency,
+        p95_latency_ms: p95,
+        p99_latency_ms: p99,
+        sample_count: newTotal,
+        health_status: this.calculateHealthStatus(successRate, avgLatency),
         updated_at: now,
       });
     } else {
@@ -82,9 +114,42 @@ class HealthMonitorService {
         successful_requests: success ? 1 : 0,
         failed_requests: success ? 0 : 1,
         success_rate: success ? 100 : 0,
+        avg_latency_ms: latencyMs,
+        p95_latency_ms: latencyMs,
+        p99_latency_ms: latencyMs,
+        sample_count: 1,
         health_status: 'HEALTHY',
       });
     }
+
+    // Retention: purge samples older than 7 days
+    await db('request_latency_samples')
+      .where('recorded_at', '<', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      .del();
+  }
+
+  /**
+   * Compute avg / p95 / p99 from latency samples within a window.
+   */
+  private async computeLatencyStats(
+    connectorAccountId: string,
+    from: Date,
+    to: Date
+  ): Promise<{ avgLatency: number; p95: number; p99: number }> {
+    const samples = await db('request_latency_samples')
+      .where({ connector_account_id: connectorAccountId })
+      .whereBetween('recorded_at', [from, to])
+      .select('latency_ms');
+
+    if (samples.length === 0) return { avgLatency: 0, p95: 0, p99: 0 };
+
+    const values = samples.map((s: any) => s.latency_ms).sort((a: number, b: number) => a - b);
+    const sum = values.reduce((a: number, b: number) => a + b, 0);
+    return {
+      avgLatency: Math.round(sum / values.length),
+      p95: percentile(values, 95),
+      p99: percentile(values, 99),
+    };
   }
 
   /**
@@ -102,10 +167,23 @@ class HealthMonitorService {
     const account = await db('provider_accounts').where({ id: connectorAccountId }).first();
     if (!account) return null;
 
-    const totalRequests = metrics.reduce((sum, m) => sum + m.total_requests, 0);
-    const successfulRequests = metrics.reduce((sum, m) => sum + m.successful_requests, 0);
-    const failedRequests = metrics.reduce((sum, m) => sum + m.failed_requests, 0);
+    const totalRequests = metrics.reduce((sum: number, m: any) => sum + m.total_requests, 0);
+    const successfulRequests = metrics.reduce((sum: number, m: any) => sum + m.successful_requests, 0);
+    const failedRequests = metrics.reduce((sum: number, m: any) => sum + m.failed_requests, 0);
     const successRate = totalRequests > 0 ? (successfulRequests / totalRequests) * 100 : 100;
+
+    // Weighted average of persisted percentiles
+    let weightedAvg = 0;
+    let weightedP95 = 0;
+    let weightedP99 = 0;
+    let weightSum = 0;
+    for (const m of metrics) {
+      const w = m.sample_count || m.total_requests || 1;
+      weightedAvg += (m.avg_latency_ms || 0) * w;
+      weightedP95 += (m.p95_latency_ms || 0) * w;
+      weightedP99 += (m.p99_latency_ms || 0) * w;
+      weightSum += w;
+    }
 
     return {
       connectorAccountId,
@@ -115,10 +193,43 @@ class HealthMonitorService {
       totalRequests,
       successfulRequests,
       failedRequests,
-      avgLatencyMs: 0, // TODO: Calculate from actual data
-      p95LatencyMs: 0,
+      avgLatencyMs: weightSum > 0 ? Math.round(weightedAvg / weightSum) : 0,
+      p95LatencyMs: weightSum > 0 ? Math.round(weightedP95 / weightSum) : 0,
+      p99LatencyMs: weightSum > 0 ? Math.round(weightedP99 / weightSum) : 0,
       lastUpdated: new Date(),
     };
+  }
+
+  /**
+   * Latency trend over time (hourly or daily granularity).
+   */
+  async getLatencyTrend(
+    connectorAccountId: string,
+    from: Date,
+    to: Date,
+    granularity: 'hour' | 'day' = 'hour'
+  ): Promise<LatencyTrend[]> {
+    const fmt = granularity === 'hour' ? 'YYYY-MM-DD HH24:00' : 'YYYY-MM-DD';
+    const rows = await db('provider_health_metrics')
+      .where({ connector_account_id: connectorAccountId })
+      .whereBetween('metric_time', [from, to])
+      .select(
+        db.raw(`to_char(metric_time, '${fmt}') as period`),
+        db.raw('SUM(total_requests) as sample_count'),
+        db.raw('AVG(avg_latency_ms)::int as avg_latency_ms'),
+        db.raw('AVG(p95_latency_ms)::int as p95_latency_ms'),
+        db.raw('AVG(p99_latency_ms)::int as p99_latency_ms')
+      )
+      .groupByRaw(`to_char(metric_time, '${fmt}')`)
+      .orderBy('period', 'asc');
+
+    return rows.map((r: any) => ({
+      period: r.period,
+      avgLatencyMs: r.avg_latency_ms || 0,
+      p95LatencyMs: r.p95_latency_ms || 0,
+      p99LatencyMs: r.p99_latency_ms || 0,
+      sampleCount: parseInt(r.sample_count, 10) || 0,
+    }));
   }
 
   /**
@@ -178,6 +289,32 @@ class HealthMonitorService {
           createdAt: new Date(),
         });
       }
+
+      // Check latency
+      if (metrics.p95LatencyMs >= thresholds.latencyCriticalMs) {
+        await this.demoteConnector(account.id, 'LATENCY', metrics.p95LatencyMs);
+        alerts.push({
+          id: '',
+          connectorAccountId: account.id,
+          alertType: 'LATENCY',
+          severity: 'CRITICAL',
+          message: `p95 latency ${metrics.p95LatencyMs}ms exceeds critical threshold ${thresholds.latencyCriticalMs}ms`,
+          metrics: { p95LatencyMs: metrics.p95LatencyMs, threshold: thresholds.latencyCriticalMs },
+          status: 'ACTIVE',
+          createdAt: new Date(),
+        });
+      } else if (metrics.p95LatencyMs >= thresholds.latencyWarningMs) {
+        alerts.push({
+          id: '',
+          connectorAccountId: account.id,
+          alertType: 'LATENCY',
+          severity: 'WARNING',
+          message: `p95 latency ${metrics.p95LatencyMs}ms exceeds warning threshold ${thresholds.latencyWarningMs}ms`,
+          metrics: { p95LatencyMs: metrics.p95LatencyMs, threshold: thresholds.latencyWarningMs },
+          status: 'ACTIVE',
+          createdAt: new Date(),
+        });
+      }
     }
 
     return alerts;
@@ -217,13 +354,22 @@ class HealthMonitorService {
     const account = await db('provider_accounts').where({ id: connectorAccountId }).first();
     if (!account) return;
 
+    const outage = await db('provider_outages')
+      .where({ connector_account_id: connectorAccountId, status: 'ACTIVE' })
+      .orderBy('started_at', 'desc')
+      .first();
+
+    const durationMinutes = outage
+      ? Math.round((Date.now() - new Date(outage.started_at).getTime()) / 60000)
+      : 0;
+
     // Resolve active outages
     await db('provider_outages')
       .where({ connector_account_id: connectorAccountId, status: 'ACTIVE' })
       .update({
         status: 'RESOLVED',
         resolved_at: new Date(),
-        duration_minutes: 0, // TODO: Calculate
+        duration_minutes: durationMinutes,
       });
 
     // Restore weight
@@ -274,7 +420,6 @@ class HealthMonitorService {
       if (metrics) {
         connectors.push(metrics);
       } else {
-        // Return default healthy status for unused connectors
         connectors.push({
           connectorAccountId: account.id,
           provider: account.provider,
@@ -285,6 +430,7 @@ class HealthMonitorService {
           failedRequests: 0,
           avgLatencyMs: 0,
           p95LatencyMs: 0,
+          p99LatencyMs: 0,
           lastUpdated: new Date(),
         });
       }

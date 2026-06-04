@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { reconciliationService } from '../services/reconciliation.service';
+import { pspSyncService } from '../services/psp-sync.service';
 import { authenticateJwt, requireRole } from '../middleware/auth';
 
 const router = Router();
@@ -36,6 +37,23 @@ router.post('/merchants/:merchantId/reconciliation/run', authenticateJwt, async 
     const reportDate = new Date(req.body.date);
     const report = await reconciliationService.runReconciliation(req.params.merchantId, reportDate);
     res.json(report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Historical backfill
+router.post('/merchants/:merchantId/reconciliation/backfill', authenticateJwt, requireRole('FINANCE'), async (req: Request, res: Response) => {
+  try {
+    const from = new Date(req.body.from);
+    const to = new Date(req.body.to);
+    const result = await reconciliationService.runHistoricalReconciliation(
+      req.params.merchantId,
+      from,
+      to,
+      { forceRerun: Boolean(req.body.forceRerun) }
+    );
+    res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -96,6 +114,55 @@ router.post('/reconciliation/discrepancies/:discrepancyId/resolve', authenticate
       req.body.notes
     );
     res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PSP auto-sync ──
+
+// Trigger manual sync for a merchant
+router.post('/merchants/:merchantId/reconciliation/sync', authenticateJwt, requireRole('FINANCE'), async (req: Request, res: Response) => {
+  try {
+    const results = await pspSyncService.syncAllForMerchant(req.params.merchantId);
+    res.json({ results });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Trigger manual sync for a specific source
+router.post('/reconciliation/sources/:sourceId/sync', authenticateJwt, async (req: Request, res: Response) => {
+  try {
+    const result = await pspSyncService.syncSource(req.params.sourceId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Bank settlement import ──
+
+// Import bank settlement file
+router.post('/merchants/:merchantId/reconciliation/settlements', authenticateJwt, requireRole('FINANCE'), async (req: Request, res: Response) => {
+  try {
+    const record = await reconciliationService.importBankSettlement(req.params.merchantId, {
+      ...req.body,
+      valueDate: new Date(req.body.valueDate),
+    });
+    res.json(record);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List settlements
+router.get('/merchants/:merchantId/reconciliation/settlements', authenticateJwt, async (req: Request, res: Response) => {
+  try {
+    const from = new Date(req.query.from as string);
+    const to = new Date(req.query.to as string);
+    const records = await reconciliationService.listSettlements(req.params.merchantId, from, to);
+    res.json(records);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

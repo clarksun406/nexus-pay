@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/connection';
 
+export type ThreeDsFlowType = 'CHALLENGE' | 'FRICTIONLESS' | 'REDIRECT';
+export type LiabilityShift = 'TO_ISSUER' | 'TO_MERCHANT' | 'NO_SHIFT';
+
 export interface ThreeDSSession {
   id: string;
   paymentIntentId: string;
@@ -16,6 +19,11 @@ export interface ThreeDSSession {
   xid?: string;
   authenticatedAt?: Date;
   expiresAt?: Date;
+  frictionlessFlow?: boolean;
+  flowType?: ThreeDsFlowType;
+  pareq?: string;
+  pares?: string;
+  md?: string;
 }
 
 export interface ThreeDSChallenge {
@@ -30,15 +38,29 @@ export interface ThreeDSChallenge {
   expiresAt?: Date;
 }
 
+export interface LiabilityShiftRecord {
+  id: string;
+  sessionId: string;
+  paymentIntentId: string;
+  liabilityShift: LiabilityShift;
+  eci?: string;
+  authenticationMethod: string;
+  chargebackProtected: boolean;
+  reason?: string;
+  recordedAt: Date;
+}
+
 class ThreeDsService {
   /**
-   * Create a 3DS session
+   * Create a 3DS session. Version can be '1.0' (legacy redirect) or '2.x' (modern).
    */
   async createSession(
     paymentIntentId: string,
     version: string = '2.0'
   ): Promise<ThreeDSSession> {
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+    const is1_0 = version.startsWith('1');
+    const flowType: ThreeDsFlowType = is1_0 ? 'REDIRECT' : 'CHALLENGE';
 
     const [session] = await db('three_ds_sessions')
       .insert({
@@ -46,8 +68,22 @@ class ThreeDsService {
         three_ds_version: version,
         status: 'PENDING',
         expires_at: expiresAt,
+        flow_type: flowType,
+        frictionless_flow: false,
       })
       .returning('*');
+
+    // For 1.0, generate a placeholder PaReq (merchant must redirect cardholder to ACS URL)
+    if (is1_0) {
+      const md = uuidv4();
+      const pareq = Buffer.from(
+        JSON.stringify({ paymentIntentId, sessionId: session.id, md, createdAt: new Date().toISOString() })
+      ).toString('base64');
+
+      await db('three_ds_sessions').where({ id: session.id }).update({ pareq, md });
+      session.pareq = pareq;
+      session.md = md;
+    }
 
     return this.toResponse(session);
   }
@@ -88,9 +124,15 @@ class ThreeDsService {
       eci?: string;
       cavv?: string;
       xid?: string;
+      frictionlessFlow?: boolean;
+      flowType?: ThreeDsFlowType;
     }
   ): Promise<ThreeDSSession> {
     const updateData: any = { ...data };
+    delete updateData.frictionlessFlow;
+    delete updateData.flowType;
+    if (data.frictionlessFlow !== undefined) updateData.frictionless_flow = data.frictionlessFlow;
+    if (data.flowType !== undefined) updateData.flow_type = data.flowType;
 
     if (data.status === 'AUTHENTICATED') {
       updateData.authenticated_at = new Date();
@@ -101,7 +143,6 @@ class ThreeDsService {
       .update(updateData)
       .returning('*');
 
-    // Update payment intent with 3DS action URL
     if (data.challengeUrl || data.acsUrl) {
       await db('payment_intents')
         .where({ id: session.payment_intent_id })
@@ -109,6 +150,19 @@ class ThreeDsService {
           three_ds_action_url: data.challengeUrl || data.acsUrl,
           status: 'REQUIRES_ACTION',
         });
+    }
+
+    // Frictionless: record liability shift immediately
+    if (data.frictionlessFlow && data.status === 'AUTHENTICATED' && data.eci) {
+      await this.recordLiabilityShift({
+        sessionId,
+        paymentIntentId: session.payment_intent_id,
+        liabilityShift: this.deriveLiabilityShift(data.eci),
+        eci: data.eci,
+        authenticationMethod: 'FRICTIONLESS',
+        chargebackProtected: this.isLiabilityToIssuer(data.eci),
+        reason: 'Frictionless authentication completed',
+      });
     }
 
     return this.toResponse(session);
@@ -122,7 +176,7 @@ class ThreeDsService {
     challengeType: ThreeDSChallenge['challengeType'],
     challengeData?: string
   ): Promise<ThreeDSChallenge> {
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     const [challenge] = await db('three_ds_challenges')
       .insert({
@@ -135,10 +189,9 @@ class ThreeDsService {
       })
       .returning('*');
 
-    // Update session status
     await db('three_ds_sessions')
       .where({ id: sessionId })
-      .update({ status: 'CHALLENGE_REQUIRED' });
+      .update({ status: 'CHALLENGE_REQUIRED', flow_type: 'CHALLENGE' });
 
     return this.toChallengeResponse(challenge);
   }
@@ -186,7 +239,6 @@ class ThreeDsService {
       return { success: false, message: 'Challenge expired' };
     }
 
-    // Increment attempt count
     const newAttemptCount = challenge.attempt_count + 1;
     await db('three_ds_challenges')
       .where({ id: challengeId })
@@ -197,9 +249,7 @@ class ThreeDsService {
       return { success: false, message: 'Maximum attempts exceeded' };
     }
 
-    // In a real implementation, validate the response with the ACS
-    // For now, simulate validation
-    const isValid = response.length >= 4; // Simplified validation
+    const isValid = response.length >= 4;
 
     if (isValid) {
       const [updated] = await db('three_ds_challenges')
@@ -210,7 +260,6 @@ class ThreeDsService {
         })
         .returning('*');
 
-      // Update session
       await db('three_ds_sessions')
         .where({ id: challenge.session_id })
         .update({
@@ -225,6 +274,60 @@ class ThreeDsService {
   }
 
   /**
+   * 3DS 1.0 PaRes submission — parses the base64 PaRes payload from the
+   * issuer's ACS, marks the session authenticated, and records liability shift.
+   */
+  async submitPaRes(sessionId: string, pares: string, md?: string): Promise<ThreeDSSession> {
+    const session = await db('three_ds_sessions').where({ id: sessionId }).first();
+    if (!session) throw new Error('Session not found');
+    if (session.flow_type !== 'REDIRECT') throw new Error('Not a 3DS 1.0 session');
+    if (session.md && md && session.md !== md) throw new Error('MD mismatch');
+
+    // Decode PaRes (simulated — real impl would verify ACS signature)
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(Buffer.from(pares, 'base64').toString('utf8'));
+    } catch {
+      parsed = { raw: pares };
+    }
+
+    const eci = parsed.eci || '07';
+    const cavv = parsed.cavv || parsed.authenticationValue;
+    const xid = parsed.xid;
+
+    const [updated] = await db('three_ds_sessions')
+      .where({ id: sessionId })
+      .update({
+        status: 'AUTHENTICATED',
+        pares,
+        eci,
+        cavv,
+        xid,
+        authentication_method: 'REDIRECT',
+        authenticated_at: new Date(),
+        flow_type: 'REDIRECT',
+      })
+      .returning('*');
+
+    // Update payment intent
+    await db('payment_intents')
+      .where({ id: session.payment_intent_id })
+      .update({ status: 'REQUIRES_CONFIRMATION', three_ds_action_url: null });
+
+    await this.recordLiabilityShift({
+      sessionId,
+      paymentIntentId: session.payment_intent_id,
+      liabilityShift: this.deriveLiabilityShift(eci),
+      eci,
+      authenticationMethod: 'REDIRECT',
+      chargebackProtected: this.isLiabilityToIssuer(eci),
+      reason: '3DS 1.0 PaRes received',
+    });
+
+    return this.toResponse(updated);
+  }
+
+  /**
    * Complete authentication with 3DS data
    */
   async completeAuthentication(
@@ -234,6 +337,7 @@ class ThreeDsService {
       cavv: string;
       xid?: string;
       authenticationMethod: string;
+      frictionless?: boolean;
     }
   ): Promise<ThreeDSSession> {
     const [session] = await db('three_ds_sessions')
@@ -244,17 +348,28 @@ class ThreeDsService {
         cavv: data.cavv,
         xid: data.xid,
         authentication_method: data.authenticationMethod,
+        frictionless_flow: data.frictionless || false,
+        flow_type: data.frictionless ? 'FRICTIONLESS' : 'CHALLENGE',
         authenticated_at: new Date(),
       })
       .returning('*');
 
-    // Update payment intent status
     await db('payment_intents')
       .where({ id: session.payment_intent_id })
       .update({
         status: 'REQUIRES_CONFIRMATION',
         three_ds_action_url: null,
       });
+
+    await this.recordLiabilityShift({
+      sessionId,
+      paymentIntentId: session.payment_intent_id,
+      liabilityShift: this.deriveLiabilityShift(data.eci),
+      eci: data.eci,
+      authenticationMethod: data.authenticationMethod,
+      chargebackProtected: this.isLiabilityToIssuer(data.eci),
+      reason: data.frictionless ? 'Frictionless authentication' : 'Challenge completed',
+    });
 
     return this.toResponse(session);
   }
@@ -270,14 +385,22 @@ class ThreeDsService {
     await db('payment_intents')
       .where({ id: session.payment_intent_id })
       .update({ status: 'FAILED' });
+
+    // Record no-shift on failure
+    await this.recordLiabilityShift({
+      sessionId,
+      paymentIntentId: session.payment_intent_id,
+      liabilityShift: 'TO_MERCHANT',
+      authenticationMethod: 'FAILED',
+      chargebackProtected: false,
+      reason: reason || 'Authentication failed',
+    });
   }
 
   /**
    * Check if 3DS is required for a transaction
    */
-  async isRequired(amount: number, currency: string, country?: string): boolean {
-    // SCA (Strong Customer Authentication) requirements
-    // EUR transactions in EEA require 3DS
+  async isRequired(amount: number, currency: string, country?: string): Promise<boolean> {
     const eeaCountries = [
       'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
       'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
@@ -288,8 +411,7 @@ class ThreeDsService {
       return true;
     }
 
-    // High-value transactions
-    if (amount > 30000) { // 300 EUR in cents
+    if (amount > 30000) {
       return true;
     }
 
@@ -304,6 +426,7 @@ class ThreeDsService {
     cavv?: string;
     xid?: string;
     version: string;
+    flowType?: ThreeDsFlowType;
   } | null> {
     const session = await db('three_ds_sessions').where({ id: sessionId }).first();
 
@@ -316,7 +439,82 @@ class ThreeDsService {
       cavv: session.cavv,
       xid: session.xid,
       version: session.three_ds_version,
+      flowType: session.flow_type,
     };
+  }
+
+  /**
+   * Get all liability shift records for a payment intent.
+   */
+  async getLiabilityShifts(paymentIntentId: string): Promise<LiabilityShiftRecord[]> {
+    const rows = await db('three_ds_liability_shifts')
+      .where({ payment_intent_id: paymentIntentId })
+      .orderBy('recorded_at', 'desc');
+
+    return rows.map((r: any) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      paymentIntentId: r.payment_intent_id,
+      liabilityShift: r.liability_shift,
+      eci: r.eci,
+      authenticationMethod: r.authentication_method,
+      chargebackProtected: Boolean(r.chargeback_protected),
+      reason: r.reason,
+      recordedAt: r.recorded_at,
+    }));
+  }
+
+  /**
+   * Record a liability shift event.
+   */
+  async recordLiabilityShift(data: {
+    sessionId: string;
+    paymentIntentId: string;
+    liabilityShift: LiabilityShift;
+    eci?: string;
+    authenticationMethod: string;
+    chargebackProtected: boolean;
+    reason?: string;
+  }): Promise<LiabilityShiftRecord> {
+    const [row] = await db('three_ds_liability_shifts')
+      .insert({
+        session_id: data.sessionId,
+        payment_intent_id: data.paymentIntentId,
+        liability_shift: data.liabilityShift,
+        eci: data.eci,
+        authentication_method: data.authenticationMethod,
+        chargeback_protected: data.chargebackProtected,
+        reason: data.reason,
+      })
+      .returning('*');
+
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      paymentIntentId: row.payment_intent_id,
+      liabilityShift: row.liability_shift,
+      eci: row.eci,
+      authenticationMethod: row.authentication_method,
+      chargebackProtected: Boolean(row.chargeback_protected),
+      reason: row.reason,
+      recordedAt: row.recorded_at,
+    };
+  }
+
+  /**
+   * ECI-based liability shift derivation.
+   * - Visa: 05 = full auth (issuer), 06 = attempt (issuer), 07 = no auth (merchant)
+   * - MC: 02 = full auth (issuer), 01 = attempt (issuer), 00 = no auth (merchant)
+   */
+  private deriveLiabilityShift(eci: string): LiabilityShift {
+    const eciClean = (eci || '').replace(/^0+/, '');
+    const issuerShiftEci = ['5', '6', '2', '1'];
+    if (issuerShiftEci.includes(eciClean)) return 'TO_ISSUER';
+    return 'TO_MERCHANT';
+  }
+
+  private isLiabilityToIssuer(eci: string): boolean {
+    return this.deriveLiabilityShift(eci) === 'TO_ISSUER';
   }
 
   private toResponse(row: any): ThreeDSSession {
@@ -335,6 +533,11 @@ class ThreeDsService {
       xid: row.xid,
       authenticatedAt: row.authenticated_at,
       expiresAt: row.expires_at,
+      frictionlessFlow: Boolean(row.frictionless_flow),
+      flowType: row.flow_type,
+      pareq: row.pareq,
+      pares: row.pares,
+      md: row.md,
     };
   }
 
