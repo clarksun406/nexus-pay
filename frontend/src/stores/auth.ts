@@ -32,6 +32,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!accessToken.value)
 
+  /** Flat list of all merchants across all org memberships. */
+  const merchants = computed<MerchantMembership[]>(() =>
+    memberships.value.flatMap(m => m.merchants)
+  )
+
   function setTokens(access: string, refresh: string) {
     accessToken.value = access
     refreshToken.value = refresh
@@ -85,7 +90,7 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     user, accessToken, refreshToken, memberships,
     activeOrgId, activeMerchantId, mode,
-    isAuthenticated,
+    isAuthenticated, merchants,
     setTokens, setAuth, setActiveMerchant, toggleMode, logout, fetchMe,
   }
 }, {

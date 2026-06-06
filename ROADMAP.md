@@ -150,16 +150,16 @@ three_ds_liability_shifts    -- 责任转移记录（liability_shift / eci / cha
 
 > 提升效率、降低成本、增强竞争力
 
-### 5. 网络令牌化（Network Tokenization）
+### 5. 网络令牌化（Network Tokenization）✅
 
 **目标**：授权率提升 3-5%，降低欺诈 26%
 
 **功能点**：
-- [ ] Visa/MC/Amex 网络令牌
-- [ ] 令牌生命周期管理
-- [ ] Cryptogram 生成
-- [ ] 令牌刷新/删除
-- [ ] PAN 回退机制
+- [x] Visa/MC/Amex 网络令牌
+- [x] 令牌生命周期管理
+- [x] Cryptogram 生成
+- [x] 令牌刷新/删除
+- [x] PAN 回退机制
 
 **数据模型**：
 ```sql
@@ -167,29 +167,67 @@ network_tokens            -- 网络令牌
 token_lifecycle_events    -- 令牌生命周期事件
 ```
 
-**工作量**：4-5 周（需与卡网络对接）
+**实现文件**：
+- `services/network-token.service.ts` — 令牌注册、刷新、删除、cryptogram 生成、PAN 回退
+- `routes/network-token.routes.ts` — REST API（CRUD + cryptogram + 生命周期事件）
+- `services/scheduler.service.ts` — 定时刷新即将到期的令牌（30 分钟间隔）
+- `services/payment-intent.service.ts` — confirm() 中支持 networkTokenId 参数，自动使用 DPT 替代原始卡号
+
+**新增 API**：
+- `POST   /api/v1/merchants/:merchantId/network-tokens` — 注册网络令牌（DEVELOPER+）
+- `GET    /api/v1/merchants/:merchantId/network-tokens` — 列出令牌
+- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId` — 查询单个令牌
+- `DELETE /api/v1/merchants/:merchantId/network-tokens/:tokenId` — 删除令牌
+- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/refresh` — 刷新令牌
+- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/suspend` — 挂起令牌
+- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/resume` — 恢复令牌
+- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/cryptogram` — 生成 cryptogram
+- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId/pan-fallback` — PAN 回退（ADMIN 专用）
+- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId/events` — 生命周期事件
+
+**完成日期**：2026-06-12
 
 ---
 
-### 6. 成本优化路由
+### 6. 成本优化路由 ✅
 
 **目标**：动态选择最低成本渠道
 
 **功能点**：
-- [ ] 费率配置管理
-- [ ] 实时成本计算
-- [ ] 成本路由规则
-- [ ] 成本报表
-- [ ] 异常费用检测
+- [x] 费率配置管理（`fee_schedules` CRUD）
+- [x] 实时成本计算（cost preview API）
+- [x] 成本路由规则（`cost_aware` 规则标记 + 自动选最便宜渠道）
+- [x] 成本报表（月度聚合报表）
+- [x] 异常费用检测（PSP 实际费 vs 预期费）
 
 **数据模型**：
 ```sql
--- 扩展现有 provider_accounts.fee_config
-fee_schedules             -- 费率表
-cost_analytics            -- 成本分析
+fee_schedules     -- 费率表（PERCENTAGE_FLAT / PERCENTAGE_TIERED / FLAT）
+cost_analytics    -- 成本分析（按月聚合：总交易量、总费用、预期费用、偏差）
+fee_anomalies     -- 异常费用记录（INFO / WARNING / CRITICAL）
+-- routing_rules 新增列：cost_aware（boolean）、fee_schedule_id（FK）
 ```
 
-**工作量**：2-3 周
+**实现文件**：
+- `services/fee-schedule.service.ts` — 费率配置 CRUD、成本预览、月度聚合、异常检测
+- `routes/fee-schedule.routes.ts` — REST API（费率表 + 成本报告 + 异常）
+- `services/routing-engine.ts` — `cost_aware` 规则自动选最低成本渠道
+- `services/routing-rule.service.ts` — 支持 `costAware` / `feeScheduleId` 字段
+
+**新增 API**（均位于 `/api/v1/merchants/:merchantId/cost`）：
+- `GET    /schedules` — 列出费率表
+- `POST   /schedules` — 创建费率表（MANAGE）
+- `GET    /schedules/:id` — 查询费率表
+- `PUT    /schedules/:id` — 更新费率表（MANAGE）
+- `DELETE /schedules/:id` — 删除费率表（MANAGE）
+- `POST   /cost-preview` — 成本预览（输入金额 → 输出费用/bp/净额）
+- `GET    /cost-report?from=&to=` — 成本报表（FINANCE+）
+- `GET    /cost-anomalies` — 异常费用列表（FINANCE+）
+- `POST   /cost-anomalies/detect` — 触发异常检测（FINANCE+）
+- `POST   /cost-anomalies/:id/resolve` — 标记异常已解决（FINANCE+）
+- `POST   /cost-aggregate` — 手动触发月度聚合
+
+**完成日期**：2026-06-12
 
 ---
 

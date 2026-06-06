@@ -45,4 +45,24 @@ export const config = {
   logs: {
     retentionPeriods: parseInt(process.env.LOG_RETENTION_PERIODS || '4'),
   },
+  networkToken: {
+    enabled: process.env.NETWORK_TOKEN_ENABLED === 'true',
+    stubMode: process.env.NETWORK_TOKEN_STUB_MODE !== 'false', // stub by default
+    refreshWindowDays: parseInt(process.env.NETWORK_TOKEN_REFRESH_WINDOW_DAYS || '30'),
+    visa: {
+      baseUrl: process.env.VISA_VTS_BASE_URL || '',
+      clientId: process.env.VISA_VTS_CLIENT_ID || '',
+      sharedSecret: process.env.VISA_VTS_SHARED_SECRET || '',
+    },
+    mastercard: {
+      baseUrl: process.env.MC_MDES_BASE_URL || '',
+      clientId: process.env.MC_MDES_CLIENT_ID || '',
+      sharedSecret: process.env.MC_MDES_SHARED_SECRET || '',
+    },
+    amex: {
+      baseUrl: process.env.AMEX_ET_BASE_URL || '',
+      clientId: process.env.AMEX_ET_CLIENT_ID || '',
+      sharedSecret: process.env.AMEX_ET_SHARED_SECRET || '',
+    },
+  },
 };

@@ -17,6 +17,8 @@ export class RoutingRuleService {
       fallback_account_id: body.fallbackAccountId,
       weight: body.weight || 1,
       max_cost_bps: body.maxCostBps,
+      cost_aware: body.costAware === true,
+      fee_schedule_id: body.feeScheduleId || null,
     }).returning('*');
 
     return this.toResponse(rule);
@@ -53,6 +55,8 @@ export class RoutingRuleService {
     if (body.fallbackAccountId) updates.fallback_account_id = body.fallbackAccountId;
     if (body.weight !== undefined) updates.weight = body.weight;
     if (body.maxCostBps !== undefined) updates.max_cost_bps = body.maxCostBps;
+    if (body.costAware !== undefined) updates.cost_aware = body.costAware === true;
+    if (body.feeScheduleId !== undefined) updates.fee_schedule_id = body.feeScheduleId || null;
 
     const [updated] = await db('routing_rules').where({ id: ruleId }).update(updates).returning('*');
     return this.toResponse(updated);
@@ -79,6 +83,8 @@ export class RoutingRuleService {
       fallbackAccountId: rule.fallback_account_id,
       weight: rule.weight,
       maxCostBps: rule.max_cost_bps,
+      costAware: rule.cost_aware,
+      feeScheduleId: rule.fee_schedule_id,
       createdAt: rule.created_at,
       updatedAt: rule.updated_at,
     };

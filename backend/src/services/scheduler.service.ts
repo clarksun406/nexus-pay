@@ -1,6 +1,8 @@
 import { retryService } from '../services/retry.service';
 import { healthMonitorService } from '../services/health-monitor.service';
 import { pspSyncService } from '../services/psp-sync.service';
+import { networkTokenService } from '../services/network-token.service';
+import { config } from '../config';
 import db from '../db/connection';
 
 class SchedulerService {
@@ -8,6 +10,7 @@ class SchedulerService {
   private healthCheckIntervalId: NodeJS.Timeout | null = null;
   private pspSyncIntervalId: NodeJS.Timeout | null = null;
   private settlementCheckIntervalId: NodeJS.Timeout | null = null;
+  private tokenRefreshIntervalId: NodeJS.Timeout | null = null;
 
   /**
    * Start the scheduler
@@ -79,6 +82,19 @@ class SchedulerService {
       }
     }, intervalMs * 60 * 6);
 
+    // Network token refresh — every 30 minutes
+    this.tokenRefreshIntervalId = setInterval(async () => {
+      try {
+        if (!config.networkToken.enabled) return;
+        const result = await networkTokenService.refreshExpiringTokens();
+        if (result.refreshed > 0 || result.failed > 0) {
+          console.log(`Network token refresh: ${result.refreshed} refreshed, ${result.failed} failed`);
+        }
+      } catch (err) {
+        console.error('Network token refresh error:', err);
+      }
+    }, intervalMs * 30);
+
     console.log('Scheduler started');
   }
 
@@ -101,6 +117,10 @@ class SchedulerService {
     if (this.settlementCheckIntervalId) {
       clearInterval(this.settlementCheckIntervalId);
       this.settlementCheckIntervalId = null;
+    }
+    if (this.tokenRefreshIntervalId) {
+      clearInterval(this.tokenRefreshIntervalId);
+      this.tokenRefreshIntervalId = null;
     }
     console.log('Scheduler stopped');
   }

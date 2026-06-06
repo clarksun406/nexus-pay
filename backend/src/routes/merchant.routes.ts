@@ -11,6 +11,8 @@ import { memberService } from '../services/member.service';
 import { logService } from '../services/log.service';
 import { disputeService } from '../services/dispute.service';
 import { payoutService } from '../services/payout.service';
+import networkTokenRoutes from './network-token.routes';
+import feeScheduleRoutes from './fee-schedule.routes';
 
 const router = Router({ mergeParams: true });
 
@@ -534,5 +536,11 @@ router.get('/:merchantId/payouts/:payoutId', requireRole(...READ_ALL), async (re
     res.status(err.status || 500).json({ title: 'Error', detail: err.message });
   }
 });
+
+// ── Network Tokens ──
+router.use('/:merchantId/network-tokens', networkTokenRoutes);
+
+// ── Cost Optimization (Fee Schedules, Cost Reports, Anomalies) ──
+router.use('/:merchantId/cost', feeScheduleRoutes);
 
 export default router;

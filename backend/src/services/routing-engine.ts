@@ -60,7 +60,7 @@ export class RoutingEngine {
     }
     if (candidates.length === 0) return null;
 
-    const winner = opts.costAware
+    const winner = opts.costAware || candidates.some(c => c.rule.cost_aware)
       ? candidates.reduce((cheapest, c) => (c.feeBps < cheapest.feeBps ? c : cheapest))
       : this.pickByWeight(candidates);
 

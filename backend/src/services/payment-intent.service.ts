@@ -6,6 +6,8 @@ import { retryService } from './retry.service';
 import { healthMonitorService } from './health-monitor.service';
 import { declineCodeService } from './decline-code.service';
 import { computeFeeForConnector } from './fee-calculator';
+import { config } from '../config';
+import { decrypt } from '../utils/crypto';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -125,6 +127,21 @@ export class PaymentIntentService {
       provider = routing.primary.provider;
       providerAccountId = routing.primary.id;
       rawPmId = body.paymentMethodId;
+    }
+
+    // Network token override: if a network token ID is provided, use the
+    // decrypted token value (DPT) as the payment method instead of the raw PAN.
+    if (body.networkTokenId) {
+      if (!config.networkToken.enabled) {
+        throw Object.assign(new Error('Network tokenization is not enabled'), { status: 400 });
+      }
+      const ntRow = await db('network_tokens')
+        .where({ id: body.networkTokenId, merchant_id: merchantId, status: 'ACTIVE' })
+        .first();
+      if (!ntRow) {
+        throw Object.assign(new Error('Network token not found or not active'), { status: 404 });
+      }
+      rawPmId = decrypt(ntRow.token_value);
     }
 
     // Mark as processing
