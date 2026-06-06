@@ -246,10 +246,11 @@ router.post('/square', express.raw({ type: '*/*' }), async (req: Request, res: R
 
 // ── Braintree ───────────────────────────────────────────────────────────────
 
-function mapBraintreeKindToInternal(kind: string): { type: 'intent' | 'dispute' | 'unknown'; status?: string; eventType?: string } {
+function mapBraintreeKindToInternal(kind: string): { type: 'intent' | 'dispute' | 'refund' | 'unknown'; status?: string; eventType?: string } {
   switch (kind) {
     case 'transaction_settled': return { type: 'intent', status: 'SUCCEEDED', eventType: 'payment_intent.succeeded' };
     case 'transaction_settlement_declined': return { type: 'intent', status: 'FAILED', eventType: 'payment_intent.failed' };
+    case 'transaction_refunded': return { type: 'refund', status: 'SUCCEEDED' };
     case 'dispute_opened': return { type: 'dispute', status: 'OPEN' };
     case 'dispute_lost': return { type: 'dispute', status: 'LOST' };
     case 'dispute_won': return { type: 'dispute', status: 'WON' };
@@ -274,6 +275,48 @@ async function handleBraintreeNotification(xml: string, account: any): Promise<v
     const txId = tagValue(xml, 'id'); // first <id> usually belongs to the transaction
     if (!txId) return;
     await reconcileIntentStatus(txId, mapped.status!, mapped.eventType!);
+    return;
+  }
+
+  if (mapped.type === 'refund') {
+    const txId = tagValue(xml, 'id');
+    if (!txId) return;
+
+    // Look up the PaymentIntent by provider_payment_id
+    const intent = await db('payment_intents')
+      .where({ provider_payment_id: txId })
+      .first();
+    if (!intent) return;
+
+    // Mark all PENDING refunds for this PaymentIntent as SUCCEEDED
+    const pendingRefunds = await db('refunds')
+      .where({ payment_intent_id: intent.id, status: 'PENDING' });
+    for (const refund of pendingRefunds) {
+      await db('refunds').where({ id: refund.id }).update({
+        status: 'SUCCEEDED',
+        sync_status: 'SYNCED',
+        last_synced_at: new Date(),
+      });
+
+      await db('outbox_events').insert({
+        merchant_id: refund.merchant_id,
+        event_type: 'refund.succeeded',
+        resource_id: refund.id,
+        payload: JSON.stringify({
+          id: refund.id,
+          paymentIntentId: refund.payment_intent_id,
+          merchantId: refund.merchant_id,
+          mode: refund.mode,
+          amount: refund.amount,
+          currency: refund.currency,
+          status: 'SUCCEEDED',
+          reason: refund.reason,
+          providerRefundId: refund.provider_refund_id,
+          createdAt: refund.created_at,
+          updatedAt: new Date().toISOString(),
+        }),
+      });
+    }
     return;
   }
 

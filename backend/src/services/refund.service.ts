@@ -57,18 +57,22 @@ export class RefundService {
           status: 'SUCCEEDED',
           provider_refund_id: result.providerRefundId,
           fee_amount: fee,
+          sync_status: 'SYNCED',
+          last_synced_at: new Date(),
         });
       } else {
         await db('refunds').where({ id: refund.id }).update({
           status: 'FAILED',
           provider_refund_id: result.providerRefundId,
           failure_reason: result.failureMessage || result.failureCode || 'Refund failed',
+          sync_status: 'NOT_SYNCED',
         });
       }
     } catch (err: any) {
       await db('refunds').where({ id: refund.id }).update({
         status: 'FAILED',
         failure_reason: err.message,
+        sync_status: 'NOT_SYNCED',
       });
     }
 
@@ -118,6 +122,11 @@ export class RefundService {
       reason: refund.reason,
       providerRefundId: refund.provider_refund_id,
       failureReason: refund.failure_reason,
+      syncStatus: refund.sync_status,
+      lastSyncedAt: refund.last_synced_at,
+      syncAttempts: refund.sync_attempts,
+      retryCount: refund.retry_count,
+      nextRetryAt: refund.next_retry_at,
       createdAt: refund.created_at,
       updatedAt: refund.updated_at,
     };

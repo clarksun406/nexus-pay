@@ -2,6 +2,7 @@ import { retryService } from '../services/retry.service';
 import { healthMonitorService } from '../services/health-monitor.service';
 import { pspSyncService } from '../services/psp-sync.service';
 import { networkTokenService } from '../services/network-token.service';
+import { refundSyncService } from '../services/refund-sync.service';
 import { config } from '../config';
 import db from '../db/connection';
 
@@ -11,6 +12,9 @@ class SchedulerService {
   private pspSyncIntervalId: NodeJS.Timeout | null = null;
   private settlementCheckIntervalId: NodeJS.Timeout | null = null;
   private tokenRefreshIntervalId: NodeJS.Timeout | null = null;
+  private refundSyncIntervalId: NodeJS.Timeout | null = null;
+  private refundRetryIntervalId: NodeJS.Timeout | null = null;
+  private refundTimeoutIntervalId: NodeJS.Timeout | null = null;
 
   /**
    * Start the scheduler
@@ -95,6 +99,49 @@ class SchedulerService {
       }
     }, intervalMs * 30);
 
+    // Refund status sync — every 10 minutes (P1-8)
+    this.refundSyncIntervalId = setInterval(async () => {
+      try {
+        const merchants = await db('merchants').where({ status: 'ACTIVE' });
+        let totalSynced = 0;
+        let totalChanged = 0;
+        for (const merchant of merchants) {
+          const result = await refundSyncService.syncPendingRefunds(merchant.id);
+          totalSynced += result.synced;
+          totalChanged += result.changed;
+        }
+        if (totalSynced > 0) {
+          console.log(`Refund sync: ${totalSynced} synced, ${totalChanged} status changes across ${merchants.length} merchants`);
+        }
+      } catch (err) {
+        console.error('Refund sync error:', err);
+      }
+    }, intervalMs * 10);
+
+    // Refund retry — every 5 minutes (P1-8)
+    this.refundRetryIntervalId = setInterval(async () => {
+      try {
+        const result = await refundSyncService.retryEligibleRefunds();
+        if (result.attempted > 0) {
+          console.log(`Refund retry: ${result.attempted} attempted, ${result.succeeded} succeeded, ${result.failed} failed`);
+        }
+      } catch (err) {
+        console.error('Refund retry error:', err);
+      }
+    }, intervalMs * 5);
+
+    // Refund timeout — every 30 minutes (P1-8)
+    this.refundTimeoutIntervalId = setInterval(async () => {
+      try {
+        const count = await refundSyncService.timeoutPendingRefunds(120);
+        if (count > 0) {
+          console.log(`Refund timeout: ${count} stale PENDING refunds marked as FAILED`);
+        }
+      } catch (err) {
+        console.error('Refund timeout error:', err);
+      }
+    }, intervalMs * 30);
+
     console.log('Scheduler started');
   }
 
@@ -121,6 +168,18 @@ class SchedulerService {
     if (this.tokenRefreshIntervalId) {
       clearInterval(this.tokenRefreshIntervalId);
       this.tokenRefreshIntervalId = null;
+    }
+    if (this.refundSyncIntervalId) {
+      clearInterval(this.refundSyncIntervalId);
+      this.refundSyncIntervalId = null;
+    }
+    if (this.refundRetryIntervalId) {
+      clearInterval(this.refundRetryIntervalId);
+      this.refundRetryIntervalId = null;
+    }
+    if (this.refundTimeoutIntervalId) {
+      clearInterval(this.refundTimeoutIntervalId);
+      this.refundTimeoutIntervalId = null;
     }
     console.log('Scheduler stopped');
   }

@@ -40,6 +40,14 @@ export interface RefundResult {
   failureMessage?: string;
 }
 
+export interface QueryRefundResult {
+  found: boolean;
+  status: 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'UNKNOWN';
+  providerRefundId: string;
+  failureReason?: string;
+  rawResponse?: string;
+}
+
 const SQUARE_API_VERSION = '2024-06-04';
 
 function squareBaseUrl(mode: string): string {
@@ -624,6 +632,129 @@ class ProviderDispatcher {
       return { success: true, providerRefundId: refund.id, providerResponseJson: JSON.stringify(refund) };
     } catch (err: any) {
       return { success: false, failureCode: 'NETWORK_ERROR', failureMessage: err.message };
+    }
+  }
+
+  // ── Refund status query (P1-8) ──────────────────────────────────────────
+
+  async queryRefundStatus(
+    provider: string,
+    providerRefundId: string,
+    accountId: string,
+  ): Promise<QueryRefundResult> {
+    const account = await db('provider_accounts').where({ id: accountId }).first();
+    if (!account)
+      return { found: false, status: 'UNKNOWN', providerRefundId };
+
+    const credentials = this.loadCredentials(account);
+
+    switch (provider.toUpperCase()) {
+      case 'STRIPE':
+        return this.stripeQueryRefund(providerRefundId, credentials);
+      case 'SQUARE':
+        return this.squareQueryRefund(providerRefundId, credentials, account.mode);
+      case 'BRAINTREE':
+        return this.braintreeQueryRefund(providerRefundId, credentials, account.mode);
+      default:
+        return { found: false, status: 'UNKNOWN', providerRefundId };
+    }
+  }
+
+  private async stripeQueryRefund(refundId: string, creds: any): Promise<QueryRefundResult> {
+    const secretKey = creds.secretKey;
+    if (!secretKey) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+    try {
+      const response = await fetch(`https://api.stripe.com/v1/refunds/${refundId}`, {
+        headers: { Authorization: `Bearer ${secretKey}` },
+      });
+
+      if (!response.ok) {
+        if (response.status === 404) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+        return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+      }
+
+      const data = await response.json() as any;
+      const status: string = data.status;
+      const internalStatus: QueryRefundResult['status'] =
+        status === 'succeeded' ? 'SUCCEEDED' :
+        status === 'failed' ? 'FAILED' :
+        status === 'canceled' ? 'FAILED' : 'PENDING';
+
+      return {
+        found: true,
+        status: internalStatus,
+        providerRefundId: refundId,
+        failureReason: data.failure_reason || undefined,
+        rawResponse: JSON.stringify(data),
+      };
+    } catch {
+      return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+    }
+  }
+
+  private async squareQueryRefund(refundId: string, creds: any, mode: string): Promise<QueryRefundResult> {
+    const token = this.squareToken(creds);
+    if (!token) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+    try {
+      const response = await fetch(`${squareBaseUrl(mode)}/v2/refunds/${refundId}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Square-Version': SQUARE_API_VERSION,
+        },
+      });
+
+      if (!response.ok) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+      const data = await response.json() as any;
+      const refund = data.refund;
+      if (!refund) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+      const status: string = refund.status;
+      const internalStatus: QueryRefundResult['status'] =
+        status === 'COMPLETED' ? 'SUCCEEDED' :
+        status === 'FAILED' || status === 'REJECTED' ? 'FAILED' : 'PENDING';
+
+      return {
+        found: true,
+        status: internalStatus,
+        providerRefundId: refundId,
+        failureReason: refund.processing_fee ? undefined : undefined,
+        rawResponse: JSON.stringify(data),
+      };
+    } catch {
+      return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+    }
+  }
+
+  private async braintreeQueryRefund(refundId: string, creds: any, mode: string): Promise<QueryRefundResult> {
+    if (!this.braintreeConfigured(creds))
+      return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+    try {
+      // Braintree refunds are tied to transactions; query the refund by its ID
+      const query = `query Refund($id: ID!) { node(id: $id) { ... on Refund { id status } } }`;
+      const res = await this.braintreeGraphQL(creds, mode, query, { id: refundId });
+
+      if (!res.ok) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+      const refund = res.data?.node;
+      if (!refund) return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
+
+      const status: string = refund.status;
+      const internalStatus: QueryRefundResult['status'] =
+        status === 'SUCCESS' || status === 'SETTLED' ? 'SUCCEEDED' :
+        status === 'FAILED' ? 'FAILED' : 'PENDING';
+
+      return {
+        found: true,
+        status: internalStatus,
+        providerRefundId: refundId,
+        rawResponse: JSON.stringify(refund),
+      };
+    } catch {
+      return { found: false, status: 'UNKNOWN', providerRefundId: refundId };
     }
   }
 }

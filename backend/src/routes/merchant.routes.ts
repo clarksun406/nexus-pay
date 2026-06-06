@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticateJwt, requireRole } from '../middleware/auth';
 import { paymentIntentService } from '../services/payment-intent.service';
 import { refundService } from '../services/refund.service';
+import { refundSyncService } from '../services/refund-sync.service';
 import { connectorService } from '../services/connector.service';
 import { routingRuleService } from '../services/routing-rule.service';
 import { apiKeyService } from '../services/apikey.service';
@@ -123,6 +124,63 @@ router.get('/:merchantId/refunds', requireRole(...READ_ALL), async (req: Request
     res.status(500).json({ title: 'Error', detail: err.message });
   }
 });
+
+// Refund statistics
+router.get('/:merchantId/refunds/stats', requireRole(...READ_ALL), async (req: Request, res: Response) => {
+  try {
+    const merchantId = req.params.merchantId as string;
+    const mode = req.query.mode as string;
+    const stats = await refundSyncService.getStats(merchantId, mode || undefined);
+    res.json(stats);
+  } catch (err: any) {
+    res.status(500).json({ title: 'Error', detail: err.message });
+  }
+});
+
+// Manually sync a single refund's status from PSP
+router.post(
+  '/:merchantId/refunds/:refundId/sync',
+  requireRole(...FINANCE_WRITE),
+  async (req: Request, res: Response) => {
+    try {
+      const refundId = req.params.refundId as string;
+      const result = await refundSyncService.syncRefundStatus(refundId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ title: 'Error', detail: err.message });
+    }
+  }
+);
+
+// Manually retry a failed refund
+router.post(
+  '/:merchantId/refunds/:refundId/retry',
+  requireRole(...FINANCE_WRITE),
+  async (req: Request, res: Response) => {
+    try {
+      const refundId = req.params.refundId as string;
+      const result = await refundSyncService.retryFailedRefund(refundId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ title: 'Error', detail: err.message });
+    }
+  }
+);
+
+// Bulk sync all PENDING refunds for a merchant
+router.post(
+  '/:merchantId/refunds/sync-all',
+  requireRole(...FINANCE_WRITE),
+  async (req: Request, res: Response) => {
+    try {
+      const merchantId = req.params.merchantId as string;
+      const result = await refundSyncService.syncPendingRefunds(merchantId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ title: 'Error', detail: err.message });
+    }
+  }
+);
 
 // ── Connectors ──
 router.get('/:merchantId/connectors', requireRole(...READ_ALL), async (req: Request, res: Response) => {
