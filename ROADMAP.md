@@ -231,29 +231,49 @@ fee_anomalies     -- 异常费用记录（INFO / WARNING / CRITICAL）
 
 ---
 
-### 7. 风控规则引擎
+### 7. 风控规则引擎 ✅
 
 **目标**：欺诈预防，减少拒付
 
 **功能点**：
-- [ ] 规则配置引擎
-- [ ] 风险评分
-- [ ] 黑名单/白名单
-- [ ] 金额阈值
-- [ ] 频率限制
-- [ ] 人工审核队列
-- [ ] 第三方风控集成（可选）
+- [x] 规则配置引擎（AMOUNT_THRESHOLD / COUNTRY_BLOCK / CARD_BIN / EMAIL_DOMAIN / IP_RANGE / CUSTOM_METADATA）
+- [x] 风险评分（0-100，LOW/MEDIUM/HIGH/DECLINED）
+- [x] 黑名单/白名单（卡号、邮箱、IP、设备指纹、国家、卡BIN）
+- [x] 金额阈值 + 频率限制（15分钟窗口内同邮箱/同卡/同IP次数检测）
+- [x] 人工审核队列（PENDING → APPROVED / REJECTED）
+- [x] confirm() 集成（自动阻止/标记高风险交易）
 
 **数据模型**：
 ```sql
-fraud_rules               -- 风控规则
-fraud_scores              -- 风险评分
-fraud_alerts              -- 风险预警
-payment_reviews           -- 人工审核
-blocklists                -- 黑名单
+fraud_rules       -- 风控规则（AMOUNT_THRESHOLD | VELOCITY | COUNTRY_BLOCK | CARD_BIN | EMAIL_DOMAIN | IP_RANGE | CUSTOM_METADATA）
+fraud_scores      -- 每笔交易的风险评分快照（score + factors）
+fraud_alerts      -- 风控告警（CRITICAL / WARNING / INFO）
+payment_reviews   -- 人工审核队列（PENDING / APPROVED / REJECTED）
+blocklists        -- 黑/白名单（CARD_NUMBER / EMAIL / IP / DEVICE_FINGERPRINT / COUNTRY / CARD_BIN）
+-- payment_intents 新增列：risk_score、risk_level、review_status
 ```
 
-**工作量**：3-4 周
+**实现文件**：
+- `services/risk-engine.service.ts` — 核心评分引擎、规则匹配、黑白名单、频率检测、审核队列
+- `routes/risk.routes.ts` — REST API（规则管理 + 黑名单 + 告警 + 审核操作）
+- `services/payment-intent.service.ts` — confirm() 中插入风控评估，自动阻止/标记高风险交易
+
+**新增 API**（均位于 `/api/v1/merchants/:merchantId/risk`）：
+- `GET    /fraud-rules` — 列出风控规则
+- `POST   /fraud-rules` — 创建规则（OWNER/ADMIN/FINANCE）
+- `GET    /fraud-rules/:id` — 查询规则
+- `PUT    /fraud-rules/:id` — 更新规则
+- `DELETE /fraud-rules/:id` — 删除规则
+- `GET    /blocklists` — 列出黑白名单
+- `POST   /blocklists` — 添加条目
+- `DELETE /blocklists/:id` — 删除条目
+- `GET    /alerts` — 风控告警列表（FINANCE+）
+- `POST   /alerts/:id/resolve` — 标记已解决
+- `GET    /reviews` — 人工审核队列
+- `POST   /reviews/:id/approve` — 审核通过
+- `POST   /reviews/:id/reject` — 审核拒绝
+
+**完成日期**：2026-06-12
 
 ---
 

@@ -8,6 +8,7 @@ import { declineCodeService } from './decline-code.service';
 import { computeFeeForConnector } from './fee-calculator';
 import { config } from '../config';
 import { decrypt } from '../utils/crypto';
+import { riskEngine } from './risk-engine.service';
 
 export class PaymentIntentService {
   async create(merchantId: string, mode: string, body: any) {
@@ -142,6 +143,42 @@ export class PaymentIntentService {
         throw Object.assign(new Error('Network token not found or not active'), { status: 404 });
       }
       rawPmId = decrypt(ntRow.token_value);
+    }
+
+    // Risk evaluation
+    const billingDetails = intent.billing_details ? (typeof intent.billing_details === 'string' ? JSON.parse(intent.billing_details) : intent.billing_details) : {};
+    const riskResult = await riskEngine.evaluate(
+      merchantId,
+      intentId,
+      intent.amount,
+      intent.currency,
+      { ...billingDetails, ...(body.billingDetails || {}) },
+      body.paymentMethodType || 'card',
+      billingDetails?.cardLastFour,
+      billingDetails?.cardNetwork,
+      body.ipAddress || billingDetails?.ipAddress,
+      body.deviceFingerprint,
+    );
+
+    if (riskResult.action === 'BLOCKED') {
+      await db('payment_intents').where({ id: intentId }).update({
+        status: 'FAILED',
+        risk_score: riskResult.score,
+        risk_level: riskResult.level,
+        review_status: 'DECLINED',
+      });
+      throw Object.assign(new Error(`Payment blocked by risk engine: ${riskResult.factors.map(f => f.description).join('; ')}`), { status: 403 });
+    }
+
+    if (riskResult.action === 'REVIEW_REQUIRED') {
+      // Do not proceed; queue for review
+      await db('payment_intents').where({ id: intentId }).update({
+        status: 'REQUIRES_CONFIRMATION',
+        risk_score: riskResult.score,
+        risk_level: riskResult.level,
+        review_status: 'PENDING_REVIEW',
+      });
+      throw Object.assign(new Error('Payment flagged for manual review'), { status: 403 });
     }
 
     // Mark as processing

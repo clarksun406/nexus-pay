@@ -13,6 +13,7 @@ import { disputeService } from '../services/dispute.service';
 import { payoutService } from '../services/payout.service';
 import networkTokenRoutes from './network-token.routes';
 import feeScheduleRoutes from './fee-schedule.routes';
+import riskRoutes from './risk.routes';
 
 const router = Router({ mergeParams: true });
 
@@ -542,5 +543,8 @@ router.use('/:merchantId/network-tokens', networkTokenRoutes);
 
 // ── Cost Optimization (Fee Schedules, Cost Reports, Anomalies) ──
 router.use('/:merchantId/cost', feeScheduleRoutes);
+
+// ── Risk Engine (Fraud Rules, Blocklists, Alerts, Reviews) ──
+router.use('/:merchantId/risk', riskRoutes);
 
 export default router;
