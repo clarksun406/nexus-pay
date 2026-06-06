@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 
 /**
  * The routing engine queries the DB through the `db` connection module.
@@ -29,7 +29,7 @@ function mockDb(table: string) {
       out = [...out].sort((a, b) => {
         const va = a[order!.col];
         const vb = b[order!.col];
-        return order!.dir === 'asc' ? (va > vb ? 1 : va < vb ? -1 : 0) : (vb > va ? 1 : vb < va ? -1 : 0);
+        return order!.dir === 'asc' ? (va > vb ? 1 : va < vb ? -1 : 0) : vb > va ? 1 : vb < va ? -1 : 0;
       });
     }
     return out;
@@ -58,10 +58,18 @@ function mockDb(table: string) {
       order = { col, dir };
       return builder;
     },
-    limit(_n: number) { return builder; },
-    offset(_n: number) { return builder; },
-    first() { return Promise.resolve(apply()[0]); },
-    then(resolve: any) { return Promise.resolve(apply()).then(resolve); },
+    limit(_n: number) {
+      return builder;
+    },
+    offset(_n: number) {
+      return builder;
+    },
+    first() {
+      return Promise.resolve(apply()[0]);
+    },
+    then(resolve: any) {
+      return Promise.resolve(apply()).then(resolve);
+    },
   };
   return builder;
 }
@@ -71,7 +79,11 @@ vi.mock('../db/connection', () => ({
 }));
 
 // Import AFTER mocking so the engine picks up the mocked db.
-const { routingEngine } = await import('./routing-engine');
+let routingEngine: any;
+
+beforeAll(async () => {
+  ({ routingEngine } = await import('./routing-engine'));
+});
 
 describe('RoutingEngine', () => {
   beforeEach(() => {
@@ -93,12 +105,21 @@ describe('RoutingEngine', () => {
     // 2.9% + 30 on 1000 minor units = 320 -> 3200 bps. Rule capped at 600 bps.
     mockTables.routing_rules = [
       {
-        id: 'r1', enabled: true, priority: 1, currencies: 'USD',
-        target_account_id: 'expensive', weight: 1, max_cost_bps: 600,
+        id: 'r1',
+        enabled: true,
+        priority: 1,
+        currencies: 'USD',
+        target_account_id: 'expensive',
+        weight: 1,
+        max_cost_bps: 600,
       },
       {
-        id: 'r2', enabled: true, priority: 2, currencies: 'USD',
-        target_account_id: 'cheap', weight: 1,
+        id: 'r2',
+        enabled: true,
+        priority: 2,
+        currencies: 'USD',
+        target_account_id: 'cheap',
+        weight: 1,
       },
     ];
     mockTables.provider_accounts = [
@@ -129,10 +150,16 @@ describe('RoutingEngine', () => {
   it('matches currency, amount range, country and payment method', async () => {
     mockTables.routing_rules = [
       {
-        id: 'r1', enabled: true, priority: 1,
-        currencies: 'USD,EUR', amount_min: 500, amount_max: 5000,
-        country_codes: 'US', payment_method_types: 'card',
-        target_account_id: 'a1', weight: 1,
+        id: 'r1',
+        enabled: true,
+        priority: 1,
+        currencies: 'USD,EUR',
+        amount_min: 500,
+        amount_max: 5000,
+        country_codes: 'US',
+        payment_method_types: 'card',
+        target_account_id: 'a1',
+        weight: 1,
       },
     ];
     mockTables.provider_accounts = [{ id: 'a1', status: 'ACTIVE', fee_config: null }];

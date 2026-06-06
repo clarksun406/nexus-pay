@@ -34,8 +34,7 @@ export class DisputeService {
 
     // Stripe's dispute object exposes the related payment_intent (preferred)
     // or charge.payment_intent. Fall back to looking up by charge id.
-    const piId: string | undefined =
-      disputeObj.payment_intent || disputeObj.charge?.payment_intent;
+    const piId: string | undefined = disputeObj.payment_intent || disputeObj.charge?.payment_intent;
 
     let intent: any = null;
     if (piId) {
@@ -67,9 +66,7 @@ export class DisputeService {
       provider_payload: JSON.stringify(disputeObj),
     };
 
-    const existing = await db('disputes')
-      .where({ provider: 'STRIPE', provider_dispute_id: disputeObj.id })
-      .first();
+    const existing = await db('disputes').where({ provider: 'STRIPE', provider_dispute_id: disputeObj.id }).first();
 
     let id: string;
     let created = false;
@@ -87,8 +84,8 @@ export class DisputeService {
       eventType === 'charge.dispute.created'
         ? 'dispute.created'
         : eventType === 'charge.dispute.closed'
-        ? `dispute.${status.toLowerCase()}`
-        : 'dispute.updated';
+          ? `dispute.${status.toLowerCase()}`
+          : 'dispute.updated';
 
     await db('outbox_events').insert({
       merchant_id: intent.merchant_id,
@@ -183,7 +180,10 @@ export class DisputeService {
     if (mode) query = query.where({ mode });
 
     const [{ count }] = await query.clone().count();
-    const content = await query.orderBy('created_at', 'desc').limit(size).offset(page * size);
+    const content = await query
+      .orderBy('created_at', 'desc')
+      .limit(size)
+      .offset(page * size);
 
     return {
       content: content.map((d: any) => this.toResponse(d)),
@@ -216,20 +216,20 @@ export class DisputeService {
     const dispute = await db('disputes').where({ id: disputeId, merchant_id: merchantId }).first();
     if (!dispute) throw Object.assign(new Error('Dispute not found'), { status: 404 });
 
-    const draft = await db('dispute_evidence')
-      .where({ dispute_id: disputeId, status: 'DRAFT' })
-      .first();
+    const draft = await db('dispute_evidence').where({ dispute_id: disputeId, status: 'DRAFT' }).first();
     const updates = this.evidenceFromBody(fields);
 
     if (draft) {
       const [updated] = await db('dispute_evidence').where({ id: draft.id }).update(updates).returning('*');
       return this.evidenceResponse(updated);
     }
-    const [inserted] = await db('dispute_evidence').insert({
-      dispute_id: disputeId,
-      ...updates,
-      status: 'DRAFT',
-    }).returning('*');
+    const [inserted] = await db('dispute_evidence')
+      .insert({
+        dispute_id: disputeId,
+        ...updates,
+        status: 'DRAFT',
+      })
+      .returning('*');
     return this.evidenceResponse(inserted);
   }
 
@@ -249,19 +249,24 @@ export class DisputeService {
     const draft = await db('dispute_evidence').where({ dispute_id: disputeId }).orderBy('created_at', 'desc').first();
     let evidenceId: string;
     if (draft) {
-      const [row] = await db('dispute_evidence').where({ id: draft.id }).update({
-        ...updates,
-        status: 'SUBMITTED',
-        submitted_at: new Date(),
-      }).returning('id');
+      const [row] = await db('dispute_evidence')
+        .where({ id: draft.id })
+        .update({
+          ...updates,
+          status: 'SUBMITTED',
+          submitted_at: new Date(),
+        })
+        .returning('id');
       evidenceId = row.id;
     } else {
-      const [row] = await db('dispute_evidence').insert({
-        dispute_id: disputeId,
-        ...updates,
-        status: 'SUBMITTED',
-        submitted_at: new Date(),
-      }).returning('id');
+      const [row] = await db('dispute_evidence')
+        .insert({
+          dispute_id: disputeId,
+          ...updates,
+          status: 'SUBMITTED',
+          submitted_at: new Date(),
+        })
+        .returning('id');
       evidenceId = row.id;
     }
 
@@ -279,7 +284,9 @@ export class DisputeService {
         : null;
       let secretKey: string | undefined;
       if (account?.encrypted_credentials) {
-        try { secretKey = JSON.parse(decrypt(account.encrypted_credentials)).secretKey; } catch {}
+        try {
+          secretKey = JSON.parse(decrypt(account.encrypted_credentials)).secretKey;
+        } catch {}
       }
 
       if (!secretKey) {
@@ -309,22 +316,24 @@ export class DisputeService {
           const response = await fetch(`https://api.stripe.com/v1/disputes/${dispute.provider_dispute_id}`, {
             method: 'POST',
             headers: {
-              'Authorization': `Bearer ${secretKey}`,
+              Authorization: `Bearer ${secretKey}`,
               'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: params,
           });
-          const data = await response.json();
+          const data = (await response.json()) as { status?: string; error?: { message?: string } };
           providerResponse = JSON.stringify(data);
           if (!response.ok) {
             success = false;
             errorMessage = data?.error?.message || `Stripe responded ${response.status}`;
           } else {
             // Refresh our local status from Stripe's response.
-            await db('disputes').where({ id: disputeId }).update({
-              status: data.status === 'under_review' ? 'UNDER_REVIEW' : dispute.status,
-              provider_payload: providerResponse,
-            });
+            await db('disputes')
+              .where({ id: disputeId })
+              .update({
+                status: data.status === 'under_review' ? 'UNDER_REVIEW' : dispute.status,
+                provider_payload: providerResponse,
+              });
           }
         } catch (err: any) {
           success = false;
@@ -338,10 +347,12 @@ export class DisputeService {
       providerResponse = null;
     }
 
-    await db('dispute_evidence').where({ id: evidenceId }).update({
-      status: success ? 'SUBMITTED' : 'DRAFT',
-      provider_response: providerResponse || (errorMessage ? JSON.stringify({ error: errorMessage }) : null),
-    });
+    await db('dispute_evidence')
+      .where({ id: evidenceId })
+      .update({
+        status: success ? 'SUBMITTED' : 'DRAFT',
+        provider_response: providerResponse || (errorMessage ? JSON.stringify({ error: errorMessage }) : null),
+      });
 
     if (!success) {
       throw Object.assign(new Error(errorMessage || 'Failed to submit evidence'), { status: 502 });

@@ -9,7 +9,8 @@ const router = Router();
 // Get retry configuration
 router.get('/merchants/:merchantId/retry-config', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const config = await retryService.getRetryConfig(req.params.merchantId);
+    const merchantId = req.params.merchantId as string;
+    const config = await retryService.getRetryConfig(merchantId);
     res.json(config);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -17,21 +18,28 @@ router.get('/merchants/:merchantId/retry-config', authenticateJwt, async (req: R
 });
 
 // Update retry configuration
-router.put('/merchants/:merchantId/retry-config', authenticateJwt, requireRole('ADMIN'), async (req: Request, res: Response) => {
-  try {
-    const config = await retryService.updateRetryConfig(req.params.merchantId, req.body);
-    res.json(config);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+router.put(
+  '/merchants/:merchantId/retry-config',
+  authenticateJwt,
+  requireRole('ADMIN'),
+  async (req: Request, res: Response) => {
+    try {
+      const merchantId = req.params.merchantId as string;
+      const config = await retryService.updateRetryConfig(merchantId, req.body);
+      res.json(config);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
 
 // Get retry statistics
 router.get('/merchants/:merchantId/retry-stats', authenticateJwt, async (req: Request, res: Response) => {
   try {
+    const merchantId = req.params.merchantId as string;
     const from = new Date(req.query.from as string);
     const to = new Date(req.query.to as string);
-    const stats = await retryService.getRetryStats(req.params.merchantId, from, to);
+    const stats = await retryService.getRetryStats(merchantId, from, to);
     res.json(stats);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -54,7 +62,8 @@ router.get('/decline-codes', authenticateJwt, async (req: Request, res: Response
 // Lookup a card BIN (returns preferred provider and performance stats)
 router.get('/bin/:bin', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const info = await binRoutingService.lookup(req.params.bin);
+    const bin = req.params.bin as string;
+    const info = await binRoutingService.lookup(bin);
     if (!info) return res.status(404).json({ error: 'BIN not found' });
     res.json(info);
   } catch (err: any) {
@@ -90,8 +99,9 @@ router.post('/bin', authenticateJwt, requireRole('ADMIN'), async (req: Request, 
 // Trigger a 3DS-upgrade retry on a failed payment intent
 router.post('/payment-intents/:intentId/3ds-upgrade-retry', authenticateJwt, async (req: Request, res: Response) => {
   try {
+    const intentId = req.params.intentId as string;
     const result = await retryService.attemptThreeDsUpgrade(
-      req.params.intentId,
+      intentId,
       req.body.originalRequestId,
       req.body.declineCode,
       req.body.declineMessage,

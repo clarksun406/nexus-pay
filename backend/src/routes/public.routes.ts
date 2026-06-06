@@ -12,7 +12,8 @@ const router = Router();
 // GET /pub/pay/:token — Get payment link info (public)
 router.get('/pay/:token', async (req: Request, res: Response) => {
   try {
-    const link = await paymentLinkService.getByToken(req.params.token);
+    const token = req.params.token as string;
+    const link = await paymentLinkService.getByToken(token);
     res.json({
       token: link.token,
       title: link.title,
@@ -34,7 +35,8 @@ const checkoutSchema = z.object({
 
 router.post('/pay/:token/checkout', async (req: Request, res: Response) => {
   try {
-    const link = await paymentLinkService.getByToken(req.params.token);
+    const token = req.params.token as string;
+    const link = await paymentLinkService.getByToken(token);
     const body = checkoutSchema.parse(req.body);
 
     // Create payment intent from the link
@@ -76,7 +78,7 @@ router.post('/tokenize', async (req: Request, res: Response) => {
     const account = await routingEngine.resolveAccountForProvider(
       apiKey.merchant_id,
       body.provider.toUpperCase(),
-      apiKey.mode,
+      apiKey.mode
     );
     if (!account) {
       return res.status(400).json({ title: 'Error', detail: 'No active connector for this provider' });

@@ -54,7 +54,8 @@ router.get('/:id', authenticateJwt, async (req: Request, res: Response) => {
     if (!req.apiKey) {
       return res.status(403).json({ title: 'Forbidden', detail: 'API key required' });
     }
-    const result = await paymentIntentService.get(req.apiKey.merchantId, req.params.id);
+    const id = req.params.id as string;
+    const result = await paymentIntentService.get(req.apiKey.merchantId, id);
     res.json(result);
   } catch (err: any) {
     const status = err.status || 500;
@@ -68,8 +69,9 @@ router.post('/:id/confirm', authenticateJwt, async (req: Request, res: Response)
     if (!req.apiKey || req.apiKey.type !== 'SECRET') {
       return res.status(403).json({ title: 'Forbidden', detail: 'Secret key required' });
     }
+    const id = req.params.id as string;
     const body = confirmSchema.parse(req.body);
-    const result = await paymentIntentService.confirm(req.apiKey.merchantId, req.params.id, body, req.apiKey.mode);
+    const result = await paymentIntentService.confirm(req.apiKey.merchantId, id, body, req.apiKey.mode);
     res.json(result);
   } catch (err: any) {
     const status = err.status || 500;
@@ -83,7 +85,8 @@ router.post('/:id/cancel', authenticateJwt, async (req: Request, res: Response) 
     if (!req.apiKey || req.apiKey.type !== 'SECRET') {
       return res.status(403).json({ title: 'Forbidden', detail: 'Secret key required' });
     }
-    const result = await paymentIntentService.cancel(req.apiKey.merchantId, req.params.id);
+    const id = req.params.id as string;
+    const result = await paymentIntentService.cancel(req.apiKey.merchantId, id);
     res.json(result);
   } catch (err: any) {
     const status = err.status || 500;
@@ -97,7 +100,8 @@ router.post('/:id/capture', authenticateJwt, async (req: Request, res: Response)
     if (!req.apiKey || req.apiKey.type !== 'SECRET') {
       return res.status(403).json({ title: 'Forbidden', detail: 'Secret key required' });
     }
-    const result = await paymentIntentService.capture(req.apiKey.merchantId, req.params.id);
+    const id = req.params.id as string;
+    const result = await paymentIntentService.capture(req.apiKey.merchantId, id);
     res.json(result);
   } catch (err: any) {
     const status = err.status || 500;
@@ -109,8 +113,9 @@ router.post('/:id/capture', authenticateJwt, async (req: Request, res: Response)
 router.post('/:id/refunds', authenticateJwt, async (req: Request, res: Response) => {
   try {
     if (!req.apiKey) return res.status(403).json({ title: 'Forbidden' });
+    const id = req.params.id as string;
     const body = createRefundSchema.parse(req.body);
-    const result = await refundService.create(req.apiKey.merchantId, req.params.id, body);
+    const result = await refundService.create(req.apiKey.merchantId, id, body);
     res.status(201).json(result);
   } catch (err: any) {
     const status = err.status || 500;

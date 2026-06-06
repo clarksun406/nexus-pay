@@ -61,7 +61,8 @@ function toDecimalAmount(minorUnits: number): string {
 class ProviderDispatcher {
   async charge(provider: string, req: ChargeRequest, accountId: string): Promise<ChargeResult> {
     const account = await db('provider_accounts').where({ id: accountId }).first();
-    if (!account) return { success: false, failureCode: 'ACCOUNT_NOT_FOUND', failureMessage: 'Connector account not found' };
+    if (!account)
+      return { success: false, failureCode: 'ACCOUNT_NOT_FOUND', failureMessage: 'Connector account not found' };
 
     const credentials = this.loadCredentials(account);
 
@@ -73,7 +74,11 @@ class ProviderDispatcher {
       case 'BRAINTREE':
         return this.braintreeCharge(req, credentials, account.mode);
       default:
-        return { success: false, failureCode: 'UNSUPPORTED_PROVIDER', failureMessage: `Provider ${provider} not supported` };
+        return {
+          success: false,
+          failureCode: 'UNSUPPORTED_PROVIDER',
+          failureMessage: `Provider ${provider} not supported`,
+        };
     }
   }
 
@@ -122,9 +127,14 @@ class ProviderDispatcher {
 
   async refund(provider: string, req: RefundRequest, accountId: string): Promise<RefundResult> {
     const account = await db('provider_accounts').where({ id: accountId }).first();
-    if (!account) return { success: false, failureCode: 'ACCOUNT_NOT_FOUND', failureMessage: 'Connector account not found' };
+    if (!account)
+      return { success: false, failureCode: 'ACCOUNT_NOT_FOUND', failureMessage: 'Connector account not found' };
     if (!req.providerPaymentId) {
-      return { success: false, failureCode: 'NO_PROVIDER_PAYMENT', failureMessage: 'Payment has no provider payment id to refund' };
+      return {
+        success: false,
+        failureCode: 'NO_PROVIDER_PAYMENT',
+        failureMessage: 'Payment has no provider payment id to refund',
+      };
     }
 
     const credentials = this.loadCredentials(account);
@@ -137,7 +147,11 @@ class ProviderDispatcher {
       case 'BRAINTREE':
         return this.braintreeRefund(req, credentials, account.mode);
       default:
-        return { success: false, failureCode: 'UNSUPPORTED_PROVIDER', failureMessage: `Provider ${provider} not supported` };
+        return {
+          success: false,
+          failureCode: 'UNSUPPORTED_PROVIDER',
+          failureMessage: `Provider ${provider} not supported`,
+        };
     }
   }
 
@@ -176,14 +190,20 @@ class ProviderDispatcher {
       const response = await fetch('https://api.stripe.com/v1/payment_intents', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${creds.secretKey}`,
+          Authorization: `Bearer ${creds.secretKey}`,
           'Content-Type': 'application/x-www-form-urlencoded',
           'Idempotency-Key': req.idempotencyKey,
         },
         body: params,
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        status: string;
+        id: string;
+        next_action?: { redirect_to_url?: { url: string } };
+        last_payment_error?: { code?: string; message?: string };
+        [key: string]: any;
+      };
       const providerResponseJson = JSON.stringify(data);
 
       if (response.ok) {
@@ -205,7 +225,13 @@ class ProviderDispatcher {
         }
         // Async processing — final state arrives via webhook.
         if (status === 'processing') {
-          return { success: false, pending: true, providerStatus: status, providerPaymentId: data.id, providerResponseJson };
+          return {
+            success: false,
+            pending: true,
+            providerStatus: status,
+            providerPaymentId: data.id,
+            providerResponseJson,
+          };
         }
         // requires_payment_method / canceled / etc.
         return {
@@ -233,7 +259,7 @@ class ProviderDispatcher {
     const response = await fetch(`https://api.stripe.com/v1/payment_intents/${paymentId}/capture`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${creds.secretKey}`,
+        Authorization: `Bearer ${creds.secretKey}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
     });
@@ -244,7 +270,7 @@ class ProviderDispatcher {
     const response = await fetch(`https://api.stripe.com/v1/payment_intents/${paymentId}/cancel`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${creds.secretKey}`,
+        Authorization: `Bearer ${creds.secretKey}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
     });
@@ -264,13 +290,18 @@ class ProviderDispatcher {
       const response = await fetch('https://api.stripe.com/v1/refunds', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${creds.secretKey}`,
+          Authorization: `Bearer ${creds.secretKey}`,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: params,
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        status: string;
+        id: string;
+        failure_reason?: string;
+        [key: string]: any;
+      };
 
       if (response.ok) {
         // Stripe refund status: succeeded | pending | failed | canceled | requires_action
@@ -279,7 +310,7 @@ class ProviderDispatcher {
           success: ok,
           providerRefundId: data.id,
           providerResponseJson: JSON.stringify(data),
-          failureCode: ok ? undefined : (data.failure_reason || `REFUND_${data.status}`),
+          failureCode: ok ? undefined : data.failure_reason || `REFUND_${data.status}`,
           failureMessage: ok ? undefined : `Refund status: ${data.status}`,
         };
       }
@@ -319,14 +350,20 @@ class ProviderDispatcher {
       const response = await fetch(`${squareBaseUrl(mode)}/v2/payments`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'Square-Version': SQUARE_API_VERSION,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        status: string;
+        id: string;
+        next_action?: { redirect_to_url?: { url: string } };
+        last_payment_error?: { code?: string; message?: string };
+        [key: string]: any;
+      };
       const providerResponseJson = JSON.stringify(data);
 
       if (response.ok && data.payment) {
@@ -336,7 +373,13 @@ class ProviderDispatcher {
           return { success: true, providerStatus: status, providerPaymentId: data.payment.id, providerResponseJson };
         }
         if (status === 'PENDING') {
-          return { success: false, pending: true, providerStatus: status, providerPaymentId: data.payment.id, providerResponseJson };
+          return {
+            success: false,
+            pending: true,
+            providerStatus: status,
+            providerPaymentId: data.payment.id,
+            providerResponseJson,
+          };
         }
         return {
           success: false,
@@ -366,7 +409,7 @@ class ProviderDispatcher {
     const response = await fetch(`${squareBaseUrl(mode)}/v2/payments/${paymentId}/complete`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        Authorization: `Bearer ${token}`,
         'Square-Version': SQUARE_API_VERSION,
         'Content-Type': 'application/json',
       },
@@ -381,7 +424,7 @@ class ProviderDispatcher {
     const response = await fetch(`${squareBaseUrl(mode)}/v2/payments/${paymentId}/cancel`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        Authorization: `Bearer ${token}`,
         'Square-Version': SQUARE_API_VERSION,
         'Content-Type': 'application/json',
       },
@@ -396,14 +439,18 @@ class ProviderDispatcher {
       return { success: false, failureCode: 'NO_CREDENTIALS', failureMessage: 'Square access token not configured' };
     }
     if (!req.currency) {
-      return { success: false, failureCode: 'MISSING_CURRENCY', failureMessage: 'Currency is required for a Square refund' };
+      return {
+        success: false,
+        failureCode: 'MISSING_CURRENCY',
+        failureMessage: 'Currency is required for a Square refund',
+      };
     }
 
     try {
       const response = await fetch(`${squareBaseUrl(mode)}/v2/refunds`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'Square-Version': SQUARE_API_VERSION,
           'Content-Type': 'application/json',
         },
@@ -414,7 +461,12 @@ class ProviderDispatcher {
         }),
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        status: string;
+        id: string;
+        failure_reason?: string;
+        [key: string]: any;
+      };
 
       if (response.ok && data.refund) {
         const status: string = data.refund.status;
@@ -450,20 +502,24 @@ class ProviderDispatcher {
     creds: any,
     mode: string,
     query: string,
-    variables: any,
+    variables: any
   ): Promise<{ ok: boolean; data?: any; errorCode?: string; errorMessage?: string }> {
     const auth = Buffer.from(`${creds.publicKey}:${creds.privateKey}`).toString('base64');
     const response = await fetch(braintreeUrl(mode), {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         'Braintree-Version': BRAINTREE_API_VERSION,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ query, variables }),
     });
 
-    const json = await response.json();
+    const json = (await response.json()) as {
+      errors?: Array<{ extensions?: { legacyCode?: string }; message?: string }>;
+      data?: any;
+      [key: string]: any;
+    };
     if (!response.ok || (Array.isArray(json.errors) && json.errors.length > 0)) {
       return {
         ok: false,
@@ -476,7 +532,11 @@ class ProviderDispatcher {
 
   private async braintreeCharge(req: ChargeRequest, creds: any, mode: string): Promise<ChargeResult> {
     if (!this.braintreeConfigured(creds)) {
-      return { success: false, failureCode: 'NO_CREDENTIALS', failureMessage: 'Braintree publicKey/privateKey not configured' };
+      return {
+        success: false,
+        failureCode: 'NO_CREDENTIALS',
+        failureMessage: 'Braintree publicKey/privateKey not configured',
+      };
     }
 
     try {
@@ -503,7 +563,12 @@ class ProviderDispatcher {
       const status: string = txn.status;
       const successStatuses = ['AUTHORIZED', 'SUBMITTED_FOR_SETTLEMENT', 'SETTLING', 'SETTLEMENT_PENDING', 'SETTLED'];
       if (successStatuses.includes(status)) {
-        return { success: true, providerStatus: status, providerPaymentId: txn.id, providerResponseJson: JSON.stringify(txn) };
+        return {
+          success: true,
+          providerStatus: status,
+          providerPaymentId: txn.id,
+          providerResponseJson: JSON.stringify(txn),
+        };
       }
       return {
         success: false,
@@ -535,7 +600,11 @@ class ProviderDispatcher {
 
   private async braintreeRefund(req: RefundRequest, creds: any, mode: string): Promise<RefundResult> {
     if (!this.braintreeConfigured(creds)) {
-      return { success: false, failureCode: 'NO_CREDENTIALS', failureMessage: 'Braintree publicKey/privateKey not configured' };
+      return {
+        success: false,
+        failureCode: 'NO_CREDENTIALS',
+        failureMessage: 'Braintree publicKey/privateKey not configured',
+      };
     }
 
     try {

@@ -7,7 +7,8 @@ const router = Router();
 // Create 3DS session (API key required) — supports version "1.0" (redirect) or "2.x"
 router.post('/payment-intents/:intentId/3ds/session', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.createSession(req.params.intentId, req.body.version);
+    const intentId = req.params.intentId as string;
+    const session = await threeDsService.createSession(intentId, req.body.version);
     res.json(session);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -17,7 +18,8 @@ router.post('/payment-intents/:intentId/3ds/session', requireSecretKey, async (r
 // Get session
 router.get('/3ds/sessions/:sessionId', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.getSession(req.params.sessionId);
+    const sessionId = req.params.sessionId as string;
+    const session = await threeDsService.getSession(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -30,7 +32,8 @@ router.get('/3ds/sessions/:sessionId', authenticateJwt, async (req: Request, res
 // Get session by payment intent
 router.get('/payment-intents/:intentId/3ds/session', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.getSessionByIntent(req.params.intentId);
+    const intentId = req.params.intentId as string;
+    const session = await threeDsService.getSessionByIntent(intentId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -43,7 +46,8 @@ router.get('/payment-intents/:intentId/3ds/session', requireSecretKey, async (re
 // Update session with 3DS data
 router.put('/3ds/sessions/:sessionId', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.updateSession(req.params.sessionId, req.body);
+    const sessionId = req.params.sessionId as string;
+    const session = await threeDsService.updateSession(sessionId, req.body);
     res.json(session);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -53,11 +57,8 @@ router.put('/3ds/sessions/:sessionId', requireSecretKey, async (req: Request, re
 // Create challenge
 router.post('/3ds/sessions/:sessionId/challenge', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const challenge = await threeDsService.createChallenge(
-      req.params.sessionId,
-      req.body.challengeType,
-      req.body.challengeData
-    );
+    const sessionId = req.params.sessionId as string;
+    const challenge = await threeDsService.createChallenge(sessionId, req.body.challengeType, req.body.challengeData);
     res.json(challenge);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -67,7 +68,8 @@ router.post('/3ds/sessions/:sessionId/challenge', requireSecretKey, async (req: 
 // Get active challenge
 router.get('/3ds/sessions/:sessionId/challenge', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const challenge = await threeDsService.getActiveChallenge(req.params.sessionId);
+    const sessionId = req.params.sessionId as string;
+    const challenge = await threeDsService.getActiveChallenge(sessionId);
     if (!challenge) {
       return res.status(404).json({ error: 'No active challenge' });
     }
@@ -80,7 +82,8 @@ router.get('/3ds/sessions/:sessionId/challenge', authenticateJwt, async (req: Re
 // Submit challenge response
 router.post('/3ds/challenges/:challengeId/submit', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const result = await threeDsService.submitChallenge(req.params.challengeId, req.body.response);
+    const challengeId = req.params.challengeId as string;
+    const result = await threeDsService.submitChallenge(challengeId, req.body.response);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -90,7 +93,8 @@ router.post('/3ds/challenges/:challengeId/submit', authenticateJwt, async (req: 
 // 3DS 1.0: submit PaRes from issuer ACS
 router.post('/3ds/sessions/:sessionId/pares', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.submitPaRes(req.params.sessionId, req.body.pares, req.body.md);
+    const sessionId = req.params.sessionId as string;
+    const session = await threeDsService.submitPaRes(sessionId, req.body.pares, req.body.md);
     res.json(session);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -100,7 +104,8 @@ router.post('/3ds/sessions/:sessionId/pares', requireSecretKey, async (req: Requ
 // Complete authentication
 router.post('/3ds/sessions/:sessionId/complete', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const session = await threeDsService.completeAuthentication(req.params.sessionId, req.body);
+    const sessionId = req.params.sessionId as string;
+    const session = await threeDsService.completeAuthentication(sessionId, req.body);
     res.json(session);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -110,7 +115,8 @@ router.post('/3ds/sessions/:sessionId/complete', requireSecretKey, async (req: R
 // Fail authentication
 router.post('/3ds/sessions/:sessionId/fail', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    await threeDsService.failAuthentication(req.params.sessionId, req.body.reason);
+    const sessionId = req.params.sessionId as string;
+    await threeDsService.failAuthentication(sessionId, req.body.reason);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -120,11 +126,7 @@ router.post('/3ds/sessions/:sessionId/fail', requireSecretKey, async (req: Reque
 // Check if 3DS is required
 router.post('/3ds/check-required', requireSecretKey, async (req: Request, res: Response) => {
   try {
-    const required = await threeDsService.isRequired(
-      req.body.amount,
-      req.body.currency,
-      req.body.country
-    );
+    const required = await threeDsService.isRequired(req.body.amount, req.body.currency, req.body.country);
     res.json({ required });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -134,7 +136,8 @@ router.post('/3ds/check-required', requireSecretKey, async (req: Request, res: R
 // Get liability shift records for a payment intent
 router.get('/payment-intents/:intentId/3ds/liability-shifts', authenticateJwt, async (req: Request, res: Response) => {
   try {
-    const records = await threeDsService.getLiabilityShifts(req.params.intentId);
+    const intentId = req.params.intentId as string;
+    const records = await threeDsService.getLiabilityShifts(intentId);
     res.json(records);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
