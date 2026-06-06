@@ -2,6 +2,33 @@
 
 基于 Hyperswitch 对标分析，列出功能差距及实施优先级。
 
+> **对标基线**：Hyperswitch (42.8k stars, Rust, 100+ PSP, 微服务架构)
+> **最新对标日期**：2026-06-06
+
+---
+
+## Hyperswitch 对标总览
+
+| 维度 | Hyperswitch | NexusPay | 差距 |
+|---|---|---|---|
+| 连接器数量 | **100+**（含直连收单行 TSYS/JPM） | **3**（Stripe/Square/Braintree） | 🔴 |
+| Card Vault | PCI 合规独立服务 + BYOV (VGS/TokenEx) | 简单 `payment_tokens` 表 | 🔴 |
+| 支付方式 | 卡 + 钱包(Apple/Google/PayPal/Samsung) + BNPL(Klarna) + Pay by Bank | 仅卡 | 🔴 |
+| Cost Observability | AI 驱动费用分析 + 隐藏费用检测 + 降级告警 | 基础费率计算 + 异常检测 | 🟡 |
+| 架构 | 微服务 (Router + Scheduler + Vault + Encryption + Prism) | 单体 Express | 🟡 |
+| 调度器 | Producer/Consumer + Redis 队列（分布式） | 单进程 setInterval（无锁） | 🟡 |
+| Workflow Builder | Control Center 可视化工作流编辑器 | 无 | 🟡 |
+| Web SDK | 客户端 checkout SDK | 无 | 🟡 |
+| 智能路由 | 基于预测授权率 + 成本 + 延迟多维路由 | 加权随机 + 最低成本 | 🟢 |
+| 重试引擎 | 卡BIN+区域+方式调优 + 惩罚预算 | 拒绝码驱动 + BIN路由 + 3DS升级 | 🟢 |
+| 对账 | 2-way + 3-way + 错峰调度 | 3-way + PSP自动拉取 + 银行结算 | 🟢 |
+| 3DS | PSP无关认证抽象层 | 2.x + 1.0 + frictionless + 责任转移 | 🟢 |
+| 风控 | 独立 fraud connector 集成 | 规则引擎 + 评分 + 黑白名单 + 审核队列 | 🟢 |
+| 网络令牌化 | 有 | Visa/MC/Amex + 生命周期管理 | 🟢 |
+| 退款同步 | 有 | ✅ 刚完成 P1-8（PSP查询+重试+webhook+报表） | 🟢 |
+| MFA | 文档未提及 | TOTP + 备份码 | ✅ 领先 |
+| 部署复杂度 | 多服务需编排 | 单个 docker-compose | ✅ 领先 |
+
 ---
 
 ## P0 - 核心能力（必须有）✅ 全部完成
@@ -36,13 +63,7 @@ decline_code_mappings     -- 拒绝码映射
 card_bin_registry         -- BIN 注册表（card_network / issuer / preferred_provider / provider_performance）
 ```
 
-**新增 API**：
-- `GET  /api/v1/bin/:bin` - 查询 BIN 信息与优选 provider
-- `GET  /api/v1/bin` - 列出 BIN 注册表
-- `POST /api/v1/bin` - 注册/更新 BIN（ADMIN）
-- `POST /api/v1/payment-intents/:intentId/3ds-upgrade-retry` - 触发 3DS 升级重试
-
-**完成日期**：2026-06-04（BIN 路由 + 3DS 升级补齐）
+**完成日期**：2026-06-04
 
 ---
 
@@ -61,27 +82,11 @@ card_bin_registry         -- BIN 注册表（card_network / issuer / preferred_p
 - [x] 历史回溯对账（366 天内任意日期范围，支持强制重建）
 
 **实现文件**：
-- `services/reconciliation.service.ts` - 对账核心逻辑（含银行结算 + 历史回溯）
-- `services/psp-sync.service.ts` - PSP 自动拉取（Stripe / Square / Braintree 适配器）
+- `services/reconciliation.service.ts` - 对账核心逻辑
+- `services/psp-sync.service.ts` - PSP 自动拉取
 - `routes/reconciliation.routes.ts` - API 端点
 
-**数据模型**：
-```sql
-reconciliation_sources         -- 对账数据源（PSP / BANK）
-provider_transactions          -- 渠道原始交易
-reconciliation_reports         -- 对账报告
-reconciliation_discrepancies   -- 差异记录
-settlement_records             -- 银行结算记录（settlement_reference / value_date / matched_count）
-```
-
-**新增 API**：
-- `POST /api/v1/merchants/:merchantId/reconciliation/sync` - 手工触发 PSP 同步（FINANCE）
-- `POST /api/v1/reconciliation/sources/:sourceId/sync` - 同步单个数据源
-- `POST /api/v1/merchants/:merchantId/reconciliation/settlements` - 导入银行结算（FINANCE）
-- `GET  /api/v1/merchants/:merchantId/reconciliation/settlements` - 列出结算记录
-- `POST /api/v1/merchants/:merchantId/reconciliation/backfill` - 历史回溯对账（FINANCE，最多 366 天）
-
-**完成日期**：2026-06-04（PSP 自动拉取 + 银行结算 + 历史回溯补齐）
+**完成日期**：2026-06-04
 
 ---
 
@@ -94,24 +99,14 @@ settlement_records             -- 银行结算记录（settlement_reference / va
 - [x] 错误率阈值告警
 - [x] 自动禁用/降级
 - [x] 健康度看板
-- [x] 延迟监控（基于 `request_latency_samples` 的 avg / p95 / p99）
-- [x] 历史趋势分析（小时 / 天粒度，PostgreSQL 时序聚合）
+- [x] 延迟监控（avg / p95 / p99）
+- [x] 历史趋势分析（小时 / 天粒度）
 
 **实现文件**：
-- `services/health-monitor.service.ts` - 健康监控（真实延迟分位数 + 趋势）
-- `routes/health.routes.ts` - API 端点
+- `services/health-monitor.service.ts`
+- `routes/health.routes.ts`
 
-**数据模型**：
-```sql
-provider_health_metrics   -- 渠道健康指标（含 avg/p95/p99/sample_count）
-provider_outages          -- 渠道故障记录（含 duration_minutes 自动计算）
-request_latency_samples   -- 原始延迟样本（7 天保留）
-```
-
-**新增 API**：
-- `GET /api/v1/connectors/:connectorAccountId/health/trend` - 延迟趋势（?from&to&granularity=hour|day）
-
-**完成日期**：2026-06-04（延迟分位数 + 趋势补齐）
+**完成日期**：2026-06-04
 
 ---
 
@@ -123,30 +118,19 @@ request_latency_samples   -- 原始延迟样本（7 天保留）
 - [x] 3DS 会话管理
 - [x] 挑战流程处理
 - [x] 3DS 数据传递（ECI, CAVV, XID）
-- [x] 3DS 1.0 支持（PaReq / PaRes / MD redirect 流程）
-- [x] Frictionless 流程（ACS 返回无挑战时自动完成）
-- [x] 责任转移记录（基于 ECI 的 liability shift 推导，写入 `three_ds_liability_shifts`）
+- [x] 3DS 1.0 支持（PaReq / PaRes / MD redirect）
+- [x] Frictionless 流程
+- [x] 责任转移记录（ECI-based liability shift）
 
 **实现文件**：
-- `services/threeds.service.ts` - 3DS 核心逻辑（含 1.0 / 2.x 双协议 + 责任转移）
-- `routes/threeds.routes.ts` - API 端点
+- `services/threeds.service.ts`
+- `routes/threeds.routes.ts`
 
-**数据模型**：
-```sql
-three_ds_sessions            -- 3DS 会话（含 flow_type / frictionless_flow / pareq / pares / md）
-three_ds_challenges          -- 挑战记录
-three_ds_liability_shifts    -- 责任转移记录（liability_shift / eci / chargeback_protected）
-```
-
-**新增 API**：
-- `POST /api/v1/3ds/sessions/:sessionId/pares` - 3DS 1.0 PaRes 回传
-- `GET  /api/v1/payment-intents/:intentId/3ds/liability-shifts` - 查询责任转移记录
-
-**完成日期**：2026-06-04（1.0 + frictionless + liability shift 补齐）
+**完成日期**：2026-06-04
 
 ---
 
-## P1 - 重要功能（应该有）
+## P1 - 重要功能（应该有）✅ 全部完成
 
 > 提升效率、降低成本、增强竞争力
 
@@ -161,29 +145,10 @@ three_ds_liability_shifts    -- 责任转移记录（liability_shift / eci / cha
 - [x] 令牌刷新/删除
 - [x] PAN 回退机制
 
-**数据模型**：
-```sql
-network_tokens            -- 网络令牌
-token_lifecycle_events    -- 令牌生命周期事件
-```
-
 **实现文件**：
-- `services/network-token.service.ts` — 令牌注册、刷新、删除、cryptogram 生成、PAN 回退
-- `routes/network-token.routes.ts` — REST API（CRUD + cryptogram + 生命周期事件）
-- `services/scheduler.service.ts` — 定时刷新即将到期的令牌（30 分钟间隔）
-- `services/payment-intent.service.ts` — confirm() 中支持 networkTokenId 参数，自动使用 DPT 替代原始卡号
-
-**新增 API**：
-- `POST   /api/v1/merchants/:merchantId/network-tokens` — 注册网络令牌（DEVELOPER+）
-- `GET    /api/v1/merchants/:merchantId/network-tokens` — 列出令牌
-- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId` — 查询单个令牌
-- `DELETE /api/v1/merchants/:merchantId/network-tokens/:tokenId` — 删除令牌
-- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/refresh` — 刷新令牌
-- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/suspend` — 挂起令牌
-- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/resume` — 恢复令牌
-- `POST   /api/v1/merchants/:merchantId/network-tokens/:tokenId/cryptogram` — 生成 cryptogram
-- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId/pan-fallback` — PAN 回退（ADMIN 专用）
-- `GET    /api/v1/merchants/:merchantId/network-tokens/:tokenId/events` — 生命周期事件
+- `services/network-token.service.ts`
+- `routes/network-token.routes.ts`
+- `services/scheduler.service.ts`（30分钟定时刷新）
 
 **完成日期**：2026-06-12
 
@@ -200,32 +165,10 @@ token_lifecycle_events    -- 令牌生命周期事件
 - [x] 成本报表（月度聚合报表）
 - [x] 异常费用检测（PSP 实际费 vs 预期费）
 
-**数据模型**：
-```sql
-fee_schedules     -- 费率表（PERCENTAGE_FLAT / PERCENTAGE_TIERED / FLAT）
-cost_analytics    -- 成本分析（按月聚合：总交易量、总费用、预期费用、偏差）
-fee_anomalies     -- 异常费用记录（INFO / WARNING / CRITICAL）
--- routing_rules 新增列：cost_aware（boolean）、fee_schedule_id（FK）
-```
-
 **实现文件**：
-- `services/fee-schedule.service.ts` — 费率配置 CRUD、成本预览、月度聚合、异常检测
-- `routes/fee-schedule.routes.ts` — REST API（费率表 + 成本报告 + 异常）
-- `services/routing-engine.ts` — `cost_aware` 规则自动选最低成本渠道
-- `services/routing-rule.service.ts` — 支持 `costAware` / `feeScheduleId` 字段
-
-**新增 API**（均位于 `/api/v1/merchants/:merchantId/cost`）：
-- `GET    /schedules` — 列出费率表
-- `POST   /schedules` — 创建费率表（MANAGE）
-- `GET    /schedules/:id` — 查询费率表
-- `PUT    /schedules/:id` — 更新费率表（MANAGE）
-- `DELETE /schedules/:id` — 删除费率表（MANAGE）
-- `POST   /cost-preview` — 成本预览（输入金额 → 输出费用/bp/净额）
-- `GET    /cost-report?from=&to=` — 成本报表（FINANCE+）
-- `GET    /cost-anomalies` — 异常费用列表（FINANCE+）
-- `POST   /cost-anomalies/detect` — 触发异常检测（FINANCE+）
-- `POST   /cost-anomalies/:id/resolve` — 标记异常已解决（FINANCE+）
-- `POST   /cost-aggregate` — 手动触发月度聚合
+- `services/fee-schedule.service.ts`
+- `routes/fee-schedule.routes.ts`
+- `services/routing-engine.ts`
 
 **完成日期**：2026-06-12
 
@@ -236,108 +179,146 @@ fee_anomalies     -- 异常费用记录（INFO / WARNING / CRITICAL）
 **目标**：欺诈预防，减少拒付
 
 **功能点**：
-- [x] 规则配置引擎（AMOUNT_THRESHOLD / COUNTRY_BLOCK / CARD_BIN / EMAIL_DOMAIN / IP_RANGE / CUSTOM_METADATA）
+- [x] 规则配置引擎（6 种规则类型）
 - [x] 风险评分（0-100，LOW/MEDIUM/HIGH/DECLINED）
 - [x] 黑名单/白名单（卡号、邮箱、IP、设备指纹、国家、卡BIN）
-- [x] 金额阈值 + 频率限制（15分钟窗口内同邮箱/同卡/同IP次数检测）
+- [x] 金额阈值 + 频率限制（15分钟窗口）
 - [x] 人工审核队列（PENDING → APPROVED / REJECTED）
 - [x] confirm() 集成（自动阻止/标记高风险交易）
 
-**数据模型**：
-```sql
-fraud_rules       -- 风控规则（AMOUNT_THRESHOLD | VELOCITY | COUNTRY_BLOCK | CARD_BIN | EMAIL_DOMAIN | IP_RANGE | CUSTOM_METADATA）
-fraud_scores      -- 每笔交易的风险评分快照（score + factors）
-fraud_alerts      -- 风控告警（CRITICAL / WARNING / INFO）
-payment_reviews   -- 人工审核队列（PENDING / APPROVED / REJECTED）
-blocklists        -- 黑/白名单（CARD_NUMBER / EMAIL / IP / DEVICE_FINGERPRINT / COUNTRY / CARD_BIN）
--- payment_intents 新增列：risk_score、risk_level、review_status
-```
-
 **实现文件**：
-- `services/risk-engine.service.ts` — 核心评分引擎、规则匹配、黑白名单、频率检测、审核队列
-- `routes/risk.routes.ts` — REST API（规则管理 + 黑名单 + 告警 + 审核操作）
-- `services/payment-intent.service.ts` — confirm() 中插入风控评估，自动阻止/标记高风险交易
-
-**新增 API**（均位于 `/api/v1/merchants/:merchantId/risk`）：
-- `GET    /fraud-rules` — 列出风控规则
-- `POST   /fraud-rules` — 创建规则（OWNER/ADMIN/FINANCE）
-- `GET    /fraud-rules/:id` — 查询规则
-- `PUT    /fraud-rules/:id` — 更新规则
-- `DELETE /fraud-rules/:id` — 删除规则
-- `GET    /blocklists` — 列出黑白名单
-- `POST   /blocklists` — 添加条目
-- `DELETE /blocklists/:id` — 删除条目
-- `GET    /alerts` — 风控告警列表（FINANCE+）
-- `POST   /alerts/:id/resolve` — 标记已解决
-- `GET    /reviews` — 人工审核队列
-- `POST   /reviews/:id/approve` — 审核通过
-- `POST   /reviews/:id/reject` — 审核拒绝
+- `services/risk-engine.service.ts`
+- `routes/risk.routes.ts`
 
 **完成日期**：2026-06-12
 
 ---
 
-### 8. 退款状态同步
+### 8. 退款状态同步 ✅
 
 **目标**：完整退款生命周期管理
 
 **功能点**：
-- [ ] 渠道退款状态查询
-- [ ] Webhook 状态更新
-- [ ] 退款失败处理
-- [ ] 退款报表
+- [x] 渠道退款状态查询（Stripe/SBraintree/SBraintree 主动轮询）
+- [x] Webhook 状态更新（三渠道全覆盖：Stripe `refund.updated` + Square `refund.updated` + Braintree `transaction_refunded`）
+- [x] 退款失败处理（指数退避重试：5min→30min→2h，max 3次）
+- [x] 退款超时自动标记（120min PENDING → FAILED）
+- [x] 退款统计报表（Dashboard 卡片 + stats API）
+- [x] Dashboard Sync/Retry 按钮 + 批量同步
 
-**工作量**：1-2 周
+**实现文件**：
+- `services/refund-sync.service.ts` — 核心同步引擎
+- `services/provider-dispatcher.ts` — `queryRefundStatus()` 三渠道查询
+- `routes/merchant.routes.ts` — stats / sync / retry / sync-all 端点
+- `routes/webhook-inbound.routes.ts` — Braintree `transaction_refunded` 处理
+- `services/scheduler.service.ts` — 3 个定时任务（sync 10min / retry 5min / timeout 30min）
+- `services/refund.service.ts` — 创建时设置 sync_status
+- `db/migrations/009_refund_sync.ts` — sync_status / last_synced_at / sync_attempts / retry_count / next_retry_at
+
+**完成日期**：2026-06-06
 
 ---
 
-## P2 - 增强功能（可以有）
+## P2 - 增强功能（Hyperswitch 对标后重排）
 
-> 差异化竞争力、高级场景
+> 缩小与 Hyperswitch 的核心差距，差异化竞争力
 
-### 9. 分账支付（Split Payments）
+### 9. provider-dispatcher 策略化重构 🔧
 
-**目标**：支持礼品卡+卡组合支付
+**目标**：为 P3 大规模渠道扩展铺路（前置依赖）
 
 **功能点**：
-- [ ] 多支付方式组合
-- [ ] 顺序授权
-- [ ] 余额查询
-- [ ] 失败回滚
+- [ ] 抽象 `ConnectorStrategy` 接口（charge / refund / capture / cancel / queryRefund / queryPayment）
+- [ ] Stripe / Square / Braintree 实现为独立策略类
+- [ ] 策略注册表（Map<provider, ConnectorStrategy>）
+- [ ] 消除 631 行 switch/case
+- [ ] 新增 connector 只需实现接口 + 注册，不改核心代码
+
+**数据模型**：无需变更
+
+**工作量**：1 周
+
+**依赖**：无（独立重构）
+
+---
+
+### 10. Card Vault（PCI 合规卡存储）
+
+**目标**：安全存储 + 多 PSP 复用卡信息，Hyperswitch 对标
+
+**功能点**：
+- [ ] 独立 Vault 服务（可选：内嵌 Express 路由 或 独立微服务）
+- [ ] 卡号加密存储（AES-256-GCM，与现有 crypto 工具复用）
+- [ ] Token 化：`vault_tok_…` 格式，跨 PSP 复用
+- [ ] 支持存储类型：card / bank_account / wallet
+- [ ] BYOV 接口：对接外部 Vault（VGS / TokenEx 兼容）
+- [ ] PCI DSS 合规检查清单
+- [ ] 令牌过期 + 自动清理
 
 **数据模型**：
 ```sql
-split_payments            -- 分账记录
-split_payment_items       -- 分账明细
+vault_tokens            -- 保险库令牌（token_hash / token_type / encrypted_data / merchant_id / customer_id）
+vault_token_usage       -- 令牌使用记录（payment_intent_id / psp / used_at）
+vault_providers         -- 外部 Vault 配置（VGS / TokenEx / custom）
+```
+
+**工作量**：3-4 周
+
+---
+
+### 11. 新增渠道：Adyen + PayPal
+
+**目标**：覆盖面最大的两个 PSP，Hyperswitch 对标
+
+**功能点**：
+- [ ] Adyen：Checkout API 集成（/payments + /payments/details）
+- [ ] Adyen：Webhook 签名验证（HMAC-SHA256）
+- [ ] Adyen：3DS 适配
+- [ ] PayPal：Orders API v2 集成
+- [ ] PayPal：Webhook 验证（POST + 验证 URL）
+- [ ] PayPal：退款 + 争议适配
+- [ ] 两个渠道均实现 `ConnectorStrategy` 接口
+
+**数据模型**：复用现有 `provider_accounts` + `provider_config`
+
+**工作量**：各 2 周，共 4 周
+
+**前置依赖**：#9 策略化重构
+
+---
+
+### 12. 钱包 / APM 支持
+
+**目标**：Apple Pay / Google Pay 提升 checkout 转化率，Hyperswitch 对标
+
+**功能点**：
+- [ ] Apple Pay：PKPaymentToken 解密 + PSP 透传
+- [ ] Google Pay：PaymentData 解析 + gateway token 适配
+- [ ] `/pub/tokenize` 支持 wallet PM type
+- [ ] Payment Links 支持钱包选项
+- [ ] Dashboard 显示支付方式类型
+
+**数据模型**：
+```sql
+-- payment_intents 新增列：wallet_type（APPLE_PAY / GOOGLE_PAY / null）
 ```
 
 **工作量**：2-3 周
 
----
-
-### 10. Click to Pay
-
-**目标**：一键支付体验
-
-**功能点**：
-- [ ] EMVCo 标准
-- [ ] Passkeys 认证
-- [ ] 统一 SDK
-- [ ] 卡网络集成
-
-**工作量**：4-6 周（需网络认证）
+**前置依赖**：#11 Adyen（Adyen 对 Apple Pay 支持最好）
 
 ---
 
-### 11. 订阅/周期扣款
+### 13. 订阅/周期扣款
 
-**目标**：支持订阅业务
+**目标**：支持 SaaS 订阅场景
 
 **功能点**：
-- [ ] 订阅计划管理
-- [ ] 自动扣款调度
-- [ ] 失败重试
-- [ ] 订阅状态机
+- [ ] 订阅计划管理（金额/周期/试用期）
+- [ ] 自动扣款调度（cron 表达式）
+- [ ] 失败重试策略（与现有 RetryEngine 复用）
+- [ ] 订阅状态机（ACTIVE / PAST_DUE / CANCELED / EXPIRED）
+- [ ] 订阅发票生成
 
 **数据模型**：
 ```sql
@@ -350,186 +331,224 @@ subscription_invoices     -- 订阅发票
 
 ---
 
-### 12. L2/L3 数据
+### 14. Cost Observability 增强
 
-**目标**：企业卡降低交换费
-
-**功能点**：
-- [ ] L2/L3 数据字段
-- [ ] 数据校验
-- [ ] 发票关联
-
-**工作量**：1-2 周
-
----
-
-### 13. 双标卡路由
-
-**目标**：自动选择最优网络
+**目标**：缩小与 Hyperswitch Cost Observability 的差距
 
 **功能点**：
-- [ ] 双标卡识别
-- [ ] 网络优选逻辑
-- [ ] 路由记录
+- [ ] 隐藏费用检测（cross-border / currency conversion / scheme fee）
+- [ ] 降级告警（IC++ 降级为 blended rate）
+- [ ] 费用趋势图（Dashboard Chart.js 折线图）
+- [ ] 按 PSP / 卡类型 / 区域维度 drill-down
+- [ ] 费用优化建议（AI 规则：建议切换 PSP 可节省 X%）
 
-**工作量**：1-2 周
-
----
-
-## P3 - 渠道扩展
-
-### 14. 完善现有渠道
-
-- [ ] Square 完整实现
-- [ ] Braintree 完整实现
-
-**工作量**：各 2-3 周
-
----
-
-### 15. 新增渠道
-
-**优先级**：
-1. Adyen - 全球覆盖
-2. PayPal - 高渗透率
-3. Checkout.com - 欧洲
-4. Worldpay - 美国
-5. 支付宝/微信支付 - 中国
-
-**工作量**：每渠道 2-4 周
-
----
-
-## P4 - 基础设施
-
-### 16. 监控告警体系
-
-- [ ] Prometheus 指标
-- [ ] Grafana 看板
-- [ ] 告警规则
-- [ ] 日志聚合
+**数据模型**：复用 `cost_analytics` / `fee_anomalies`，新增 `fee_insights`
 
 **工作量**：2 周
 
 ---
 
-### 17. 测试覆盖
+## P3 - 长尾功能
 
-- [ ] 单元测试
-- [ ] 集成测试
-- [ ] E2E 测试
-- [ ] 性能测试
+> 高级场景、渠道深度、边缘能力
+
+### 15. 分账支付（Split Payments）
+
+- [ ] 多支付方式组合（卡 + 礼品卡 + 钱包）
+- [ ] 顺序授权 + 余额查询
+- [ ] 失败回滚
+
+**工作量**：2-3 周
+
+---
+
+### 16. Click to Pay
+
+- [ ] EMVCo 标准
+- [ ] Passkeys 认证
+- [ ] 统一 SDK
+
+**工作量**：4-6 周（需网络认证）
+
+---
+
+### 17. L2/L3 数据
+
+- [ ] L2/L3 数据字段
+- [ ] 数据校验 + 发票关联
+
+**工作量**：1-2 周
+
+---
+
+### 18. 更多渠道扩展
+
+| 渠道 | 覆盖 | 优先级 |
+|---|---|---|
+| Checkout.com | 欧洲 | 中 |
+| Worldpay | 美国 | 中 |
+| Cybersource | 全球 | 中 |
+| GlobalPayments | 全球 | 低 |
+| Fiserv | 北美 | 低 |
+| 支付宝/微信支付 | 中国 | 低 |
+
+**工作量**：每渠道 1-2 周（策略化重构后）
+
+---
+
+## P4 - 基础设施
+
+> 生产就绪、可观测性、质量保障
+
+### 19. 分布式锁（调度器多实例安全）
+
+**目标**：消除单点，支持多实例部署
+
+**方案**：
+- [ ] `pg_advisory_lock`（首选，零额外依赖）
+- [ ] 每个定时任务获取独立 advisory lock
+- [ ] 锁超时自动释放（防止死锁）
+
+**工作量**：0.5 周
+
+---
+
+### 20. 监控告警体系
+
+- [ ] Prometheus 指标（替换现有 stub `/actuator/prometheus`）
+- [ ] Grafana Dashboard（支付量 / 成功率 / p95延迟 / 错误分布）
+- [ ] 告警规则（成功率 < 90% → Slack/邮件）
+
+**工作量**：2 周
+
+---
+
+### 21. 测试覆盖
+
+- [ ] 核心集成测试（retry / reconciliation / 3DS / refund-sync）
+- [ ] 前端 E2E 测试（Playwright / Cypress）
+- [ ] 性能基准测试（k6 / autocannon）
 
 **工作量**：持续
 
 ---
 
-### 18. 文档完善
+### 22. 文档完善
 
-- [ ] API 文档（OpenAPI）
-- [ ] 架构文档
-- [ ] 运维手册
-- [ ] 故障排查指南
+- [ ] API 文档（OpenAPI / Swagger）
+- [ ] 架构文档（C4 模型）
+- [ ] 运维手册（部署 / 备份 / 恢复 / 扩缩容）
+- [ ] 故障排查指南（常见 PSP 错误码 + 处理方案）
 
 **工作量**：持续
 
 ---
 
-## 实施计划
+## 实施计划（Hyperswitch 对标后更新）
 
-### Q1 - 基础能力 ✅
+### ✅ 已完成（P0 + P1）
 
-| 阶段 | 内容 | 周数 | 状态 |
-|------|------|------|------|
-| 第1-3周 | 渠道健康监控 + 自动降级 | 3 | ✅ 完成（含延迟分位数与趋势）|
-| 第4-7周 | 智能重试引擎 | 4 | ✅ 完成（含 BIN 路由与 3DS 升级）|
-| 第8-11周 | 对账系统 | 4 | ✅ 完成（含 PSP 自动拉取 / 银行结算 / 历史回溯）|
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0-1 | 智能重试引擎（含 BIN 路由 + 3DS 升级） | ✅ |
+| P0-2 | 对账系统（3-way + PSP 自动拉取 + 银行结算） | ✅ |
+| P0-3 | 渠道健康监控 + 自动降级（含 p95/p99） | ✅ |
+| P0-4 | 完整 3DS 认证（2.x + 1.0 + frictionless + 责任转移） | ✅ |
+| P1-5 | 网络令牌化（Visa/MC/Amex） | ✅ |
+| P1-6 | 成本优化路由（费率表 + cost_aware + 异常检测） | ✅ |
+| P1-7 | 风控规则引擎（6 种规则 + 评分 + 黑白名单 + 审核） | ✅ |
+| P1-8 | 退款状态同步（PSP 查询 + webhook + 重试 + 报表） | ✅ |
 
-### Q2 - 合规与安全
+### Q3 2026 — P2 缩小 Hyperswitch 差距
 
-| 阶段 | 内容 | 周数 |
-|------|------|------|
-| 第1-4周 | 3DS 完整流程 | ✅ 4（含 1.0 / frictionless / 责任转移）|
-| 第5-8周 | 风控规则引擎 | 4 |
-| 第9-10周 | 退款状态同步 | 2 |
+| 优先级 | 内容 | 周数 | 前置依赖 |
+|---|---|---|---|
+| **P2-1** | provider-dispatcher 策略化重构 | 1 | — |
+| **P2-2** | Card Vault（PCI 合规卡存储） | 3-4 | — |
+| **P2-3** | 新增 Adyen + PayPal | 4 | P2-1 |
+| **P2-4** | 钱包/APM（Apple Pay + Google Pay） | 2-3 | P2-3 |
+| **P2-5** | 订阅/周期扣款 | 3-4 | — |
+| **P2-6** | Cost Observability 增强 | 2 | — |
 
-### Q3 - 优化与扩展
+### Q4 2026 — P3/P4 长尾 + 基础设施
 
-| 阶段 | 内容 | 周数 |
-|------|------|------|
-| 第1-3周 | 成本优化路由 | 3 |
-| 第4-8周 | 网络令牌化 | 5 |
-| 第9-12周 | 渠道扩展（Adyen/PayPal） | 4 |
-
-### Q4 - 高级功能
-
-| 阶段 | 内容 | 周数 |
-|------|------|------|
-| 第1-3周 | 分账支付 | 3 |
-| 第4-7周 | 订阅支付 | 4 |
-| 第8-12周 | Click to Pay | 5 |
-
----
-
-## 资源需求
-
-| 角色 | 人数 | 周期 |
-|------|------|------|
-| 后端工程师 | 2-3 | 持续 |
-| 前端工程师 | 1-2 | 按需 |
-| DevOps | 1 | 持续 |
-| 测试工程师 | 1 | 持续 |
-| 产品经理 | 1 | 持续 |
+| 优先级 | 内容 | 周数 |
+|---|---|---|
+| **P3-1** | 分账支付（Split Payments） | 2-3 |
+| **P3-2** | Click to Pay | 4-6 |
+| **P3-3** | L2/L3 数据 | 1-2 |
+| **P3-4** | 渠道扩展（Checkout.com / Worldpay / Cybersource） | 3-6 |
+| **P4-1** | 分布式锁（pg_advisory_lock） | 0.5 |
+| **P4-2** | Prometheus + Grafana | 2 |
+| **P4-3** | 核心集成测试 | 2 |
+| **P4-4** | OpenAPI 文档 | 1 |
 
 ---
 
 ## 风险与依赖
 
 | 风险 | 缓解措施 |
-|------|----------|
-| 卡网络认证周期长 | 提前申请，并行开发 |
-| 渠道对接复杂度高 | 抽象 Connector 层，统一接口 |
-| 对账数据格式不统一 | 建立标准化转换层 |
-| 3DS 合规要求 | 参考 EMVCo 规范，使用认证 SDK |
-| 调度器多实例重复执行 | 引入分布式锁（待 P4 基建阶段补） |
+|---|---|
+| 卡网络认证周期长（Apple Pay / Click to Pay） | 提前申请，并行开发 |
+| 渠道对接复杂度高（Adyen / PayPal） | P2-1 策略化重构后再加渠道 |
+| 对账数据格式不统一 | 已有标准化转换层 |
+| 3DS 合规要求 | 参考 EMVCo 规范 |
+| **调度器多实例重复执行** | 🔜 P4-1 pg_advisory_lock（0.5 周快速解决） |
+| **Vault PCI 合规门槛** | 渐进式：先做 token 复用，再做完整 PCI |
+| **provider-dispatcher 架构债务** | 🔜 P2-1 策略化重构（P3 渠道扩展前置依赖） |
 
 ---
 
 ## 成功指标
 
-| 指标 | 当前 | 目标 | P0 完成后 |
-|------|------|------|-----------|
-| 支付成功率 | - | 95%+ | ✅ 预计 90%+（BIN 路由 + 3DS 升级）|
-| 重试恢复率 | 0% | 20%+ | ✅ 基础能力 + BIN 智能 + 3DS 升级 |
-| 对账自动化率 | 0% | 90%+ | ✅ PSP 自动拉取 + 银行结算自动匹配 |
-| 渠道可用性 | - | 99.9% | ✅ 自动降级 + 真实延迟监控（p95/p99）|
-| 欺诈率 | - | <0.1% | 待风控引擎 |
-| 退款处理时效 | - | T+1 | 待完善 |
+| 指标 | 当前 | P2 目标 | Hyperswitch 对标 |
+|---|---|---|---|
+| PSP 连接器数量 | 3 | 5+ (Adyen + PayPal) | 100+ |
+| 支付方式 | 卡 | 卡 + Apple Pay + Google Pay | 卡 + 钱包 + BNPL + Pay by Bank |
+| Card Vault | ❌ | ✅ PCI 合规 | ✅ 独立服务 + BYOV |
+| 支付成功率 | 90%+ | 93%+ | 95%+ |
+| 重试恢复率 | 20%+ | 25%+ | 20-30% |
+| 对账自动化率 | 90%+ | 95%+ | 90%+ |
+| 渠道可用性 | 99.9% | 99.95% | 99.9% |
+| 退款处理时效 | T+1 | T+0（实时同步） | T+1 |
+| 部署复杂度 | ✅ 单 docker-compose | ✅ 单 docker-compose | 多服务编排 |
 
 ---
 
-## P0 完成总结
+## P1 完成总结
 
-**已实现功能（全部 4 大模块闭环）**：
-- ✅ 智能重试引擎：立即重试 + 延迟重试 + BIN 路由 + 3DS 升级重试
-- ✅ 拒绝码解析与分类：15 种 Stripe 错误码
-- ✅ 渠道健康监控：错误率阈值 + 真实延迟 p95/p99 + 自动降级 + 历史趋势
-- ✅ 对账系统：三方对账 + PSP 自动拉取（Stripe） + 银行结算导入 + 历史回溯
-- ✅ 3DS 认证：2.x 会话/挑战 + 1.0 redirect + frictionless + 责任转移记录
+**已实现功能（P0 4 模块 + P1 4 模块全部闭环）**：
+
+| 模块 | 内容 |
+|---|---|
+| P0-1 | 智能重试引擎：立即重试 + 延迟重试 + BIN 路由 + 3DS 升级重试 |
+| P0-2 | 对账系统：3-way + PSP 自动拉取 + 银行结算 + 366 天回溯 |
+| P0-3 | 渠道健康：错误率阈值 + p95/p99 延迟 + 自动降级 + 历史趋势 |
+| P0-4 | 3DS 认证：2.x + 1.0 + frictionless + 责任转移 |
+| P1-5 | 网络令牌化：Visa/MC/Amex + 生命周期 + cryptogram + PAN 回退 |
+| P1-6 | 成本优化：费率表 CRUD + cost_aware 路由 + 异常检测 + 月度报表 |
+| P1-7 | 风控引擎：6 种规则 + 0-100 评分 + 黑白名单 + 频率检测 + 审核队列 |
+| P1-8 | 退款同步：PSP 查询 + 三渠道 webhook + 重试 + 超时 + 统计报表 |
 
 **代码统计**：
-- 新增/修改文件：~15 个服务与路由文件
-- 新增代码：~3500 行（P0 补齐 +3500，相比 P0 初始 +2500）
-- 数据库迁移：3 个（001 初版 / 002 retry & reconciliation / 003 p0_completion）
-- 数据库新表：18 张
+- 服务文件：22 个
+- 路由文件：13 个
+- 数据库迁移：9 个
+- 数据库表：30+ 张
+- 定时任务：8 个
 
-**Scheduler 周期任务**：
-- 重试执行：每 1 分钟
-- 健康检查：每 5 分钟
-- PSP 自动拉取：每 15 分钟
-- 结算新鲜度检查：每 6 小时
+**Scheduler 周期任务（当前）**：
+| 任务 | 频率 |
+|---|---|
+| 支付重试执行 | 1 分钟 |
+| 渠道健康检查 | 5 分钟 |
+| PSP 自动拉取 | 15 分钟 |
+| 结算新鲜度检查 | 6 小时 |
+| 网络令牌刷新 | 30 分钟 |
+| 退款状态同步 | 10 分钟 |
+| 退款失败重试 | 5 分钟 |
+| 退款超时检测 | 30 分钟 |
 
-**待 P1 启动前解决**：
-- 调度器单点：引入分布式锁（推荐 `node-cron` + Redis 或 `pg_advisory_lock`）
-- `provider-dispatcher` 策略化重构：为 P3 渠道扩展铺路
-- 测试基线：至少补 retry / reconciliation / 3DS 核心集成测试
+**P2 启动前必须解决**：
+- ⚠️ `provider-dispatcher` 策略化重构（P2-1，1 周）— P3 渠道扩展的前置依赖
+- ⚠️ 分布式锁 `pg_advisory_lock`（P4-1，0.5 周）— 生产多实例部署前提
